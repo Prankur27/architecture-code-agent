@@ -1,31 +1,45 @@
 # Architecture Code Agent
 
-A set of GitHub Copilot agents that automatically analyze software repositories and generate comprehensive architecture documentation, C4 diagrams, and flow diagrams.
+A set of GitHub Copilot agents that automatically analyze software repositories, generate comprehensive architecture documentation, and drive feature development end-to-end — from JIRA ticket to working, tested, documented code.
 
 ---
 
 ## Overview
 
-This project contains **three specialized AI agents** that work together to produce a full architectural view of your system:
+This project contains **two pipelines** built from specialized AI agents:
+
+### Pipeline 1 — Architecture Documentation
+Analyzes an existing codebase and generates C4 diagrams and flow diagrams.
 
 | Agent | File | Purpose |
 |-------|------|---------|
 | 🔍 **Architecture Analyzer** | `.github/agents/architecture-analyzer.md` | Analyzes backend and UI codebases, CloudFormation, CI/CD, security tools, and NFRs |
-| 📐 **C4 Diagram Generator** | `.github/agents/c4-diagram-generator.md` | Generates C4 model diagrams (Context, Container, Component, Deployment, Security, CI/CD, Data) |
+| 📐 **C4 Diagram Generator** | `.github/agents/c4-diagram-generator.md` | Generates C4 model diagrams (C1–C3, Deployment, Security, CI/CD, Data, ERD) |
 | 🔄 **Flow Diagram Generator** | `.github/agents/flow-diagram-generator.md` | Generates sequence and flow diagrams for all system flows |
+
+### Pipeline 2 — Feature Development (Architecture as Code)
+Takes a JIRA ticket and drives it all the way to implemented, tested code with updated architecture diagrams.
+
+| Agent | File | Purpose |
+|-------|------|---------|
+| 📋 **Requirement Analyzer** | `.github/agents/requirement-analyzer.md` | Fetches JIRA ticket, deeply analyzes requirements, iterates Q&A until agreed |
+| 🏗️ **Architecture Design Agent** | `.github/agents/architecture-design-agent.md` | Produces detailed technical design (API, service, data, infra) + ADRs |
+| 🗂️ **Implementation Planning Agent** | `.github/agents/implementation-planning-agent.md` | Breaks design into file-specific, ordered task plan |
+| 💻 **Feature Implementation Agent** | `.github/agents/feature-implementation-agent.md` | Executes every task, writes production-quality code + tests |
 
 ---
 
 ## Prerequisites
 
 - **GitHub Copilot** with agent/chat mode enabled in VS Code or GitHub.com
-- Access to the backend and (optionally) UI repositories you want to analyze
+- Access to the backend and (optionally) UI repositories you want to analyze or develop against
+- For Pipeline 2: JIRA access (URL + credentials) for the project containing your epics/stories
 
 ---
 
-## Quick Start — Run the Full Workflow (Recommended)
+## Quick Start — Pipeline 1: Architecture Documentation
 
-Instead of running each agent manually, use the **Architecture Documentation Workflow Skill** to orchestrate all three agents automatically in sequence with guided pauses for your input and review.
+Use the **Architecture Documentation Workflow Skill** to orchestrate all three documentation agents in sequence.
 
 ```
 Use .github/skills/architecture-documentation-workflow.md
@@ -33,133 +47,156 @@ Use .github/skills/architecture-documentation-workflow.md
 
 The skill will:
 1. Collect all inputs (repos, branches, UI subpath) in one go
-2. Run the **Architecture Analyzer** sub-agent → pause for your review
-3. Run the **C4 Diagram Generator** sub-agent → pause for your review
-4. Run the **Flow Diagram Generator** sub-agent → pause for your review
+2. Run the **Architecture Analyzer** → pause for your review
+3. Run the **C4 Diagram Generator** → pause for your review
+4. Run the **Flow Diagram Generator** → pause for your review
 5. Offer to save all outputs as markdown files in your repository
 
-**Pause points**: The workflow stops at 6 checkpoints to ask for your input or confirmation before proceeding, ensuring you stay in control throughout.
+**Pause points**: Stops at 6 checkpoints to ask for your input or confirmation.
+
+---
+
+## Quick Start — Pipeline 2: Feature Development
+
+Use the **Feature Development Workflow Skill** to drive a JIRA ticket all the way through to implementation and updated architecture diagrams.
+
+```
+Use .github/skills/feature-development-workflow.md
+```
+
+The skill will:
+1. Collect JIRA ticket ID, repo URLs, and architecture doc paths
+2. Run the **Requirement Analyzer** — fetches JIRA, analyzes against codebase, iterates Q&A → RAD approved
+3. Run the **Architecture Design Agent** — designs the solution using existing C4/flow diagrams → DDD + ADRs approved
+4. Run the **Implementation Planning Agent** — produces ordered, file-specific task plan → Plan approved
+5. Run the **Feature Implementation Agent** — writes all code and tests task by task
+6. Run the **C4 Diagram Generator** — updates existing diagrams with new components/flows
+7. Run the **Flow Diagram Generator** — adds new flow diagrams for new user journeys
+
+**Architecture as Code**: Every feature goes through design → approval → code → diagram update. Architecture docs are always kept in sync.
+
+**Pause points**: Stops at 14 checkpoints — every approval gate requires your explicit 'approved' before proceeding.
 
 ---
 
 ## Usage — Running Agents Individually
 
-If you prefer to run each agent independently instead of using the workflow skill:
+If you prefer to run each agent independently instead of using the workflow skills:
 
-### Step 1 — Run the Architecture Analyzer Agent
+### Pipeline 1 Agents
 
-This is the **first agent** and must be run before the others. It performs deep analysis of your codebase.
+#### Step 1 — Run the Architecture Analyzer Agent
 
-1. Open GitHub Copilot Chat
-2. Reference the agent file:
+1. Open GitHub Copilot Chat and reference the agent:
    ```
-   @workspace /agent .github/agents/architecture-analyzer.md
+   Use the instructions in .github/agents/architecture-analyzer.md
    ```
-   Or in GitHub Copilot agent mode, attach the file and prompt:
-   ```
-   Use the instructions in .github/agents/architecture-analyzer.md to analyze my system.
-   ```
-3. When prompted, provide:
-   - **Backend repository path or URL** *(required)*
-   - **UI repository path or URL** *(optional)*
-   - **UI subpath** *(optional)* — e.g., `apps/dashboard` if the UI repo is a monorepo with multiple projects. Only this subpath will be analyzed.
+2. Provide: backend repo URL, branch, UI repo URL (optional), UI branch, UI subpath (optional)
+3. The agent produces an **Architecture Analysis Report** covering architecture, infrastructure, CI/CD, security, NFRs, and data flows.
+4. **Save the output** — required as input for Steps 2 and 3.
 
-4. The agent will produce an **Architecture Analysis Report** in markdown covering:
-   - System architecture & patterns
-   - Cloud infrastructure (CloudFormation / AWS resources)
-   - CI/CD pipelines (GitHub Actions)
-   - Security posture (Veracode SAST/SCA, SonarQube, secrets management, IAM)
-   - Non-functional requirements (performance, scalability, observability, DR)
-   - Data flows and integration points
-   - Architecture risks and recommendations
+#### Step 2 — Run the C4 Diagram Generator Agent
 
-5. **Save the output** — you will need it for the next two agents.
-
----
-
-### Step 2 — Run the C4 Diagram Generator Agent
-
-This agent takes the Architecture Analysis Report and produces structured C4 model diagrams.
-
-1. Open GitHub Copilot Chat
-2. Reference the agent file:
+1. Reference the agent and attach the Architecture Analysis Report:
    ```
    Use the instructions in .github/agents/c4-diagram-generator.md
+   [paste Architecture Analysis Report]
    ```
-3. Paste or attach the **Architecture Analysis Report** from Step 1 as context.
-4. The agent will generate a **C4 Diagrams Report** containing:
-   - **L1 System Context Diagram** — system in its environment with users and external systems
-   - **L2 Container Diagram** — all deployable units (apps, services, databases, brokers)
-   - **L3 Component Diagrams** — internals of the backend API and frontend application
-   - **Deployment Diagram** — AWS infrastructure topology (VPC, subnets, ECS, RDS, Lambda, etc.)
-   - **Security Architecture Diagram** — auth flows, encryption, WAF, IAM, secrets
-   - **CI/CD Pipeline Diagram** — build → test → scan → deploy pipeline
-   - **Data Architecture Diagram** — data stores, ownership, replication, encryption
+2. Produces a **C4 Diagrams Report** with: C1 System Context, C2 Container, C3 Component (Backend + Frontend), Deployment, Security, CI/CD, Data Architecture, and ERD diagrams.
 
-5. All diagrams are in **Mermaid** format and can be rendered in:
-   - GitHub Markdown (automatically rendered)
-   - VS Code with the Mermaid Preview extension
-   - Confluence with the Mermaid plugin
-   - [mermaid.live](https://mermaid.live)
+#### Step 3 — Run the Flow Diagram Generator Agent
 
----
-
-### Step 3 — Run the Flow Diagram Generator Agent
-
-This agent takes the Architecture Analysis Report and generates detailed flow and sequence diagrams for all system flows.
-
-1. Open GitHub Copilot Chat
-2. Reference the agent file:
+1. Reference the agent and attach the Architecture Analysis Report:
    ```
    Use the instructions in .github/agents/flow-diagram-generator.md
+   [paste Architecture Analysis Report]
    ```
-3. Paste or attach the **Architecture Analysis Report** from Step 1 as context.
-4. The agent will generate a **Flow Diagrams Report** containing:
-   - **Authentication & Authorization flows** (login, token refresh, RBAC)
-   - **User journey flows** for each key business scenario (end-to-end UI → API → DB)
-   - **API request lifecycle** — how requests traverse middleware, services, and data layers
-   - **Event-driven / async flows** — message publishing, consumption, retry, DLQ
-   - **Data flows** — ingestion, transformation, export
-   - **CI/CD & deployment flows** — from commit to production
-   - **Infrastructure provisioning flows** — CloudFormation stack lifecycle
-   - **Error & failure handling flows** — circuit breaker, retry with backoff, DLQ processing
+2. Produces a **Flow Diagrams Report** with: auth flows, user journeys, API lifecycle, event-driven flows, data flows, CI/CD flows, and error handling flows.
 
 ---
 
-## Example Prompts
+### Pipeline 2 Agents
 
-### For the Architecture Analyzer
+#### Step 1 — Requirement Analyzer
 ```
-Use .github/agents/architecture-analyzer.md instructions.
+Use .github/agents/requirement-analyzer.md
 
-Backend repo: https://github.com/my-org/my-backend
+JIRA ticket: PROJ-123
+JIRA URL: https://your-org.atlassian.net
+Backend repo: https://github.com/org/backend
 Backend branch: main
-UI repo: https://github.com/my-org/my-monorepo
-UI branch: develop
-UI subpath: apps/customer-portal
+Architecture docs: docs/architecture/
+```
+Fetches the JIRA ticket, analyzes requirements against the codebase, asks clarifying questions in rounds, and produces an approved Requirements Analysis Document (RAD).
 
-Analyze the full architecture of this system.
+#### Step 2 — Architecture Design Agent
+```
+Use .github/agents/architecture-design-agent.md
+[paste approved RAD]
+[attach C4 diagrams report path]
+[attach flow diagrams report path]
+```
+Designs the full technical solution (API, service, data, events, infra, frontend) and produces ADRs.
+
+#### Step 3 — Implementation Planning Agent
+```
+Use .github/agents/implementation-planning-agent.md
+[paste approved DDD]
+[paste approved RAD]
+```
+Produces an ordered, file-specific task plan with complexity estimates and a testing plan.
+
+#### Step 4 — Feature Implementation Agent
+```
+Use .github/agents/feature-implementation-agent.md
+[paste approved Implementation Plan]
+[paste approved DDD]
+[paste approved RAD]
+```
+Executes every task in the plan, writes production-quality code and tests, and produces an implementation report.
+
+---
+
+## Agent & Skill Files
+
+```
+.github/
+├── agents/
+│   │
+│   │── Pipeline 1: Architecture Documentation ────────────────
+│   ├── architecture-analyzer.md           # Codebase analysis
+│   ├── c4-diagram-generator.md            # C4 model diagrams (C1/C2/C3 + supplementary)
+│   ├── flow-diagram-generator.md          # Flow & sequence diagrams
+│   │
+│   └── Pipeline 2: Feature Development ───────────────────────
+│       ├── requirement-analyzer.md        # JIRA fetch + requirement Q&A → RAD
+│       ├── architecture-design-agent.md   # Technical design + ADRs → DDD
+│       ├── implementation-planning-agent.md  # Ordered task plan → Implementation Plan
+│       └── feature-implementation-agent.md   # Code + tests → Implementation Report
+│
+└── skills/
+    ├── architecture-documentation-workflow.md  # Orchestrates Pipeline 1 (3 agents)
+    └── feature-development-workflow.md         # Orchestrates Pipeline 2 (5 agents + diagram updates)
 ```
 
-### For the C4 Diagram Generator
-```
-Use .github/agents/c4-diagram-generator.md instructions.
+---
 
-Here is the Architecture Analysis Report:
-[paste report from Step 1]
+## Diagram Standards
 
-Generate all C4 diagrams for this system.
-```
+All generated Mermaid diagrams follow these conventions:
 
-### For the Flow Diagram Generator
-```
-Use .github/agents/flow-diagram-generator.md instructions.
+| Convention | Rule |
+|------------|------|
+| **C1 System Context** | `C4Context` format |
+| **C2 Container** | `C4Container` format |
+| **C3 Component** | `flowchart LR` with `classDef` colour coding |
+| **Deployment** | `flowchart TB` flat zones (no nested `C4Deployment`) |
+| **Security / CI/CD / Data** | `flowchart LR` with named subgraph zones + `classDef` |
+| **ERD** | `erDiagram` format |
+| **Sequence diagrams** | `sequenceDiagram` with `autonumber` |
+| **Colour coding** | 10-colour standard palette via `classDef` (never inline `style`) |
 
-Here is the Architecture Analysis Report:
-[paste report from Step 1]
-
-Generate all flow diagrams for this system.
-```
+To render Mermaid diagrams locally in VS Code, install the [Mermaid Preview](https://marketplace.visualstudio.com/items?itemName=bierner.markdown-mermaid) extension.
 
 ---
 
@@ -173,32 +210,20 @@ Generate all flow diagrams for this system.
 - ✅ GitHub Actions workflows (CI/CD pipeline stages)
 - ✅ Veracode configuration (SAST, SCA, pipeline scans)
 - ✅ SonarQube / SonarCloud (quality gates, rules)
-- ✅ Dependency scanning (Dependabot, Snyk, OWASP)
 - ✅ Authentication & Authorization (JWT, OAuth2/OIDC, Cognito, Auth0)
 - ✅ Secrets management (Secrets Manager, Parameter Store, Vault)
 - ✅ Network security (security groups, WAF, TLS, CORS)
 - ✅ Data encryption (KMS, at-rest, in-transit)
-- ✅ Performance (caching, connection pooling, async patterns)
-- ✅ Scalability (auto-scaling, serverless, horizontal scaling)
-- ✅ Observability (logging, metrics, tracing, alerting)
-- ✅ Disaster recovery (backup, RTO/RPO, multi-region)
+- ✅ Performance, scalability, observability, and disaster recovery
 - ✅ UI code (framework, state management, API integration, security)
 
----
+### Requirement Analyzer covers:
+- ✅ JIRA epic/story fetch with all fields, acceptance criteria, child stories
+- ✅ Deep requirement analysis (clarity, completeness, feasibility, security, domain)
+- ✅ Iterative Q&A rounds until all gaps are resolved
+- ✅ Impacted component mapping against actual codebase
+- ✅ Proposed API contract and data model changes
 
-## Agent & Skill Files
-
-```
-.github/
-├── agents/
-│   ├── architecture-analyzer.md    # Agent 1: Codebase analysis
-│   ├── c4-diagram-generator.md     # Agent 2: C4 model diagrams
-│   └── flow-diagram-generator.md   # Agent 3: Flow & sequence diagrams
-└── skills/
-    └── architecture-documentation-workflow.md  # Orchestrates all 3 agents in sequence
-```
-
----
 
 ## Output Formats
 
