@@ -12,6 +12,7 @@ Generated from Architecture Analysis Report — March 22, 2026
 6. [Security Architecture Diagram](#6-security-architecture-diagram)
 7. [CI/CD Pipeline Diagram](#7-cicd-pipeline-diagram)
 8. [Data Architecture Diagram](#8-data-architecture-diagram)
+9. [Database Design (ERD)](#9-database-design-entity-relationship-diagram)
 
 ---
 
@@ -277,80 +278,90 @@ C4Component
 ## 5. Deployment Diagram
 
 ```mermaid
-C4Deployment
-  title Deployment Diagram — Agent Profiles (AWS us-west-2)
+flowchart TB
+    subgraph BROWSER["👤 End User Browser (Chrome / Edge)"]
+        MFE_BUNDLE["Agent Profiles MFE\nAngular Web Component\n(loaded from CDN)"]
+    end
 
-  Deployment_Node(endUserBrowser, "End User Browser", "Chrome / Edge") {
-    Container(angularMFEDeploy, "Agent Profiles MFE", "Angular Web Component bundle", "Loaded from CDN. Embedded in CXone Shell via Module Federation.")
-  }
+    subgraph CDN["☁️ CDN Layer"]
+        CF["CloudFront + S3\nStatic MFE bundle\nHTTPS only"]
+    end
 
-  Deployment_Node(aws, "AWS Cloud", "Amazon Web Services") {
-    Deployment_Node(region, "us-west-2", "Primary Region") {
+    subgraph AWS["AWS Cloud — us-west-2"]
+        subgraph VPC["CoreNetwork-VPC (Shared Platform VPC)"]
+            ALB["Application Load Balancer\nTLS termination\nRoutes /agent-profiles/*"]
 
-      Deployment_Node(cdn, "CloudFront + S3", "CDN") {
-        Container(staticBundle, "Static MFE Bundle", "S3 + CloudFront", "Angular build artefacts. Served via HTTPS with cache-control headers.")
-      }
+            subgraph PRIVATE["Private Subnets — Az1 + Az2"]
+                ECS["ECS Fargate\nAgent Profiles API\nJava 17 / Spring Boot\nPort: 9001 (app) 8080 (mgmt)\nImage: ECR — github.sha tag"]
 
-      Deployment_Node(coreVPC, "CoreNetwork-VPC", "Shared Platform VPC") {
+                subgraph DATA["Data Layer"]
+                    AURORA_W["Aurora MySQL Writer\ndb.r7g.large\nPort 3306 / TLS"]
+                    AURORA_R1["Aurora MySQL Reader 1\ndb.r7g.large\nAuto-failover"]
+                    AURORA_R2["Aurora MySQL Reader 2\ndb.r7g.large"]
+                end
 
-        Deployment_Node(publicSubnet, "Public / DMZ Layer", "Platform-managed") {
-          Container(platformALB, "Application Load Balancer", "AWS ALB (Platform)", "TLS termination. Routes /agent-profiles/* to ECS service. Part of CXone platform shared ALB.")
-        }
+                subgraph CACHE["Cache Layer"]
+                    VALKEY["ElastiCache Valkey\ncache.m7g.xlarge\nMulti-AZ / Port 6379"]
+                end
 
-        Deployment_Node(privateSubnet, "Private Subnet (Az1 + Az2)", "CoreNetwork-Az1CoreSubnet / Az2CoreSubnet") {
-          Deployment_Node(ecsCluster, "ECS Cluster", "AWS ECS Fargate") {
-            Container(apiContainer, "Agent Profiles API", "Java 17 / Spring Boot / Docker (Jib)", "Stateless API container. Image from ECR (300813158921.dkr.ecr.us-west-2.amazonaws.com). App port: 9001, Management port: 8080.")
-          }
+                JUMP["EC2 Jump Server\nManagementCIDR only"]
+            end
+        end
 
-          Deployment_Node(cacheSubnet, "Cache Layer", "Private Subnet") {
-            ContainerDb(valkeyDeploy, "Valkey Replication Group", "AWS ElastiCache Valkey — cache.m7g.xlarge (staging/prod)", "Primary + replica node. Multi-AZ. Port 6379. At-rest encrypted. Transit TLS conditional.")
-          }
+        subgraph AWS_MANAGED["AWS Managed Services"]
+            DYNAMO["DynamoDB\nFeature toggle table"]
+            SM["Secrets Manager\n{env}-AgentProfilesSecrets"]
+            SSM["SSM Parameter Store\nEndpoints + flags"]
+            ECR["ECR\n300813158921"]
+            KMS["KMS Key\nagentProfiles-kms-key"]
+            CW["CloudWatch Alarms\nRDS + Valkey metrics"]
+        end
 
-          Deployment_Node(dataSubnet, "Data Layer", "Private Subnet") {
-            ContainerDb(auroraWriter, "Aurora MySQL Writer", "db.r7g.large (staging/prod) — aurora-mysql 3.08.2", "Primary write instance. Port 3306. Not publicly accessible. Storage encrypted.")
-            ContainerDb(auroraReader1, "Aurora MySQL Reader 1", "db.r7g.large", "Read replica 1. Auto-promoted on writer failure.")
-            ContainerDb(auroraReader2, "Aurora MySQL Reader 2", "db.r7g.large", "Read replica 2.")
-          }
+        subgraph KINESIS["Event Streaming"]
+            KTEAM["Kinesis: dev-TeamData"]
+            KUSER["Kinesis: dev-userManagement"]
+        end
+    end
 
-          Deployment_Node(mgmtSubnet, "Management", "Private Subnet") {
-            Container(jumpServer, "Jump Server", "EC2 (agent-profiles-jump-server)", "Used for DB and cache management/debug access. Accessible only from ManagementCIDR.")
-          }
-        }
+    BROWSER -- HTTPS --> CF
+    BROWSER -- HTTPS --> ALB
+    CF -- "Module Federation" --> MFE_BUNDLE
+    ALB -- "HTTP :9001" --> ECS
 
-        Deployment_Node(awsManaged, "AWS Managed Services", "Same Region") {
-          ContainerDb(dynamoDBDeploy, "DynamoDB Table", "AWS DynamoDB", "Feature toggle store. Accessed via VPC endpoint or HTTPS.")
-          Container(secretsManagerDeploy, "Secrets Manager", "AWS Secrets Manager", "DB credentials secret: {env}-AgentProfilesSecrets.")
-          Container(ssmDeploy, "SSM Parameter Store", "AWS SSM", "Runtime config: DB endpoints, FIPS flag, encryption flag, Valkey endpoints.")
-          Container(ecr, "ECR Repository", "AWS ECR — 300813158921", "Stores Docker images tagged by git SHA.")
-          Container(kmsDeploy, "KMS Key", "AWS KMS (alias: agentProfiles-kms-key)", "Encrypts SNS topics and CloudWatch alarms. Key rotation on FIPS-enabled envs.")
-          Container(cloudwatchDeploy, "CloudWatch Alarms", "AWS CloudWatch", "RDS + Valkey metric alarms. SNS notifications via KMS-encrypted topic.")
-        }
+    ECS -- "JDBC write :3306" --> AURORA_W
+    ECS -- "JDBC read :3306" --> AURORA_R1
+    ECS -- "Redis :6379" --> VALKEY
+    ECS -- "AWS SDK" --> DYNAMO
+    ECS -- "startup" --> SM
+    ECS -- "startup" --> SSM
+    ECR -- "image pull" --> ECS
+    KMS -- "encrypts" --> CW
 
-        Deployment_Node(kinesisLayer, "Event Streaming", "AWS Kinesis") {
-          Container(teamDataStream, "TeamData Stream", "AWS Kinesis Data Stream", "dev-TeamData — team lifecycle events")
-          Container(userMgmtStream, "userManagement Stream", "AWS Kinesis Data Stream", "dev-userManagement — agent lifecycle events")
-        }
-      }
-    }
-  }
+    KTEAM -- "KCL poll" --> ECS
+    KUSER -- "KCL poll" --> ECS
 
-  Rel(endUserBrowser, cdn, "Loads MFE bundle", "HTTPS")
-  Rel(endUserBrowser, platformALB, "API calls via CXone Shell proxy", "HTTPS")
-  Rel(platformALB, apiContainer, "Forwards /agent-profiles/* requests", "HTTP :9001")
-  Rel(apiContainer, auroraWriter, "Write queries", "JDBC/MySQL TLS :3306")
-  Rel(apiContainer, auroraReader1, "Read queries", "JDBC/MySQL TLS :3306")
-  Rel(apiContainer, valkeyDeploy, "Cache ops", "Redis :6379")
-  Rel(apiContainer, dynamoDBDeploy, "Feature toggle reads", "HTTPS")
-  Rel(apiContainer, secretsManagerDeploy, "Read DB credentials at startup", "HTTPS")
-  Rel(apiContainer, ssmDeploy, "Read runtime config at startup", "HTTPS")
-  Rel(apiContainer, kmsDeploy, "CloudWatch/SNS encryption", "HTTPS")
-  Rel(teamDataStream, apiContainer, "KCL poll", "Kinesis HTTPS")
-  Rel(userMgmtStream, apiContainer, "KCL poll", "Kinesis HTTPS")
-  Rel(jumpServer, auroraWriter, "Admin/debug access", "MySQL :3306")
-  Rel(jumpServer, valkeyDeploy, "Admin/debug access", "Redis :6379")
+    AURORA_W -. "auto-failover" .-> AURORA_R1
+    AURORA_R1 -. "replica" .-> AURORA_R2
+    VALKEY -. "Multi-AZ replica" .-> VALKEY
+
+    JUMP -- "MySQL :3306" --> AURORA_W
+    JUMP -- "Redis :6379" --> VALKEY
 ```
 
-**Description**: The Agent Profiles service runs on ECS Fargate within the CXone shared VPC. All data stores are in private subnets, inaccessible from the internet. The ALB terminates TLS and routes to the API container. The Angular MFE is served from CloudFront/S3. Each environment (dev/test/perf/staging) maps to a separate AWS account with its own stack.
+**Deployment Inventory:**
+
+| Layer | Resource | Spec (staging/prod) | Notes |
+|-------|----------|--------------------:|-------|
+| CDN | CloudFront + S3 | — | MFE static bundle; HTTPS only |
+| Network | Shared ALB | Platform-managed | TLS termination; routes `/agent-profiles/*` |
+| Compute | ECS Fargate | — | Stateless; ports 9001 / 8080 |
+| Database | Aurora MySQL (1 writer + 2 readers) | db.r7g.large | Multi-AZ; 30-day backup; KMS encrypted |
+| Cache | ElastiCache Valkey | cache.m7g.xlarge | Multi-AZ; 7-day snapshot |
+| Feature store | DynamoDB | On-demand | Feature toggles |
+| Secrets | Secrets Manager | — | DB credentials; KMS encrypted |
+| Config | SSM Parameter Store | — | Endpoints, FIPS flag, TLS flag |
+| Registry | ECR | — | Images tagged by `github.sha` |
+| Events | Kinesis (×2) | — | TeamData + userManagement streams |
 
 ---
 
@@ -542,94 +553,139 @@ flowchart TD
 ## 8. Data Architecture Diagram
 
 ```mermaid
-flowchart TD
-    subgraph "Data Entry Points"
-        REST_API["REST API\n(AgentProfilesController)"]
-        KINESIS_TEAM["Kinesis: TeamData Stream\n(TeamDataRecordProcessor)"]
-        KINESIS_USER["Kinesis: userManagement Stream\n(UserManagementRecordProcessor)"]
+flowchart LR
+    subgraph INGRESS["Data Ingress"]
+        REST["REST API"]
+        KIN["Kinesis Streams\n(TeamData + userManagement)"]
     end
 
-    subgraph "Application Data Layer"
-        SERVICE["AgentProfilesServiceImpl\nBusiness logic + validation"]
-        CACHE_SVC["CacheResponseServiceImpl\nCache-aside pattern"]
+    subgraph APP["Application Layer"]
+        SVC["AgentProfilesServiceImpl"]
+        CACHE["CacheResponseServiceImpl\n(cache-aside)"]
     end
 
-    subgraph "AWS Aurora MySQL 8  [Primary Store — Encrypted]"
+    subgraph STORES["Data Stores"]
         direction TB
-        WRITER["Writer Endpoint\njdbc:mysql://{cluster-writer}:3306/{env}_agentprofiles_database\n[write replica — HikariCP max:100]"]
-        READER["Reader Endpoint\njdbc:mysql://{cluster-reader}:3306/{env}_agentprofiles_database\n[read replica — HikariCP max:100]"]
-        
-        subgraph "Schema (per tenant: agentprofiles_schema_tenant_{tenantId})"
-            T_AGENT_PROFILES["agent_profiles\n(id, busId, name, status, createdAt, updatedAt)"]
-            T_PROFILE_CONFIG["agent_profile_configuration\n(profileId, configKey, configValue)\n[composite PK]"]
-            T_TEAM_MAP["agent_profile_teams_map\n(profileId, teamId)\n[junction table]"]
-            T_ASSIGNABLE["assignable_configurations\n(id, name, type, defaultValue)"]
-            T_ASSIGNABLE_EL["assignable_configurations_elements\n(configId, elementId, value, dependencies)"]
-            T_ASSIGNABLE_DEP["assignable_configurations_dependency_elements\n(elementId, dependencyId)"]
-            T_TENANT_SCHEMA["tenant_schema\n(tenantId, schemaName)"]
-            T_FLYWAY["flyway_schema_history\n(Flyway migration tracking)"]
-        end
+        AUR_W[("Aurora MySQL\nWriter\nPort 3306")]
+        AUR_R[("Aurora MySQL\nReader x2\nPort 3306")]
+        VALKEY[("ElastiCache Valkey\nPort 6379\nMulti-AZ")]
+        DDB[("DynamoDB\nFeature Toggles")]
     end
 
-    subgraph "AWS ElastiCache Valkey  [Cache Layer — Encrypted]"
-        VALKEY_PRIMARY["Primary Node\n(cache.m7g.xlarge — staging/prod)\nport: 6379"]
-        VALKEY_REPLICA["Replica Node\n(Multi-AZ auto-failover)\nSnapshot: 7-day retention"]
-        VALKEY_KEYS["Cached Data:\n- API response objects (profile list, single profile)\n- JWKS keys (L2 cache 15-30d)\n- Bad KID entries (5min TTL)"]
+    subgraph CONFIG["Config & Secrets (startup)"]
+        SM["Secrets Manager\nDB credentials"]
+        SSM["SSM Param Store\nEndpoints + flags"]
     end
 
-    subgraph "AWS DynamoDB  [Feature Store]"
-        DDB_TABLE["Feature Toggle Table\nKey: featureName\nValue: enabled (boolean) + metadata"]
-    end
-
-    subgraph "AWS Secrets Manager  [Secrets]"
-        SM_SECRET["{env}-AgentProfilesSecrets\ndbUsername / dbPassword\nKMS encrypted"]
-    end
-
-    subgraph "AWS SSM Parameter Store  [Config]"
-        SSM_WRITE["/{env}/agent-profiles/rds/aurora/writeEndpoint"]
-        SSM_READ["/{env}/agent-profiles/rds/aurora/readEndpoint"]
-        SSM_VALKEY_HOST["/{env}/agent-profiles/valkey/RG/host"]
-        SSM_VALKEY_PORT["/{env}/agent-profiles/valkey/RG/port"]
-        SSM_FIPS["/agent-profiles/FIPS_ENABLED"]
-        SSM_TLS["/agent-profiles/ENCRYPTION_IN_TRANSIT_INTERNAL"]
-    end
-
-    REST_API --> SERVICE
-    KINESIS_TEAM --> SERVICE
-    KINESIS_USER --> SERVICE
-
-    SERVICE --> CACHE_SVC
-    CACHE_SVC -->|cache hit| REST_API
-    CACHE_SVC -->|cache miss| WRITER
-    CACHE_SVC -->|cache miss| READER
-    CACHE_SVC <-->|get/set/del| VALKEY_PRIMARY
-
-    SERVICE -->|writes| WRITER
-    SERVICE -->|reads| READER
-    SERVICE -->|feature flags| DDB_TABLE
-    
-    WRITER --> T_AGENT_PROFILES & T_PROFILE_CONFIG & T_TEAM_MAP & T_ASSIGNABLE & T_ASSIGNABLE_EL & T_ASSIGNABLE_DEP & T_TENANT_SCHEMA
-    READER --> T_AGENT_PROFILES & T_PROFILE_CONFIG & T_TEAM_MAP & T_ASSIGNABLE
-
-    VALKEY_PRIMARY <--> VALKEY_REPLICA
-    VALKEY_PRIMARY --> VALKEY_KEYS
-
-    SM_SECRET -->|resolved at CloudFormation deploy| WRITER
-    SSM_WRITE & SSM_READ -->|env var injection at ECS task start| WRITER & READER
-    SSM_VALKEY_HOST & SSM_VALKEY_PORT -->|env var injection| VALKEY_PRIMARY
-    SSM_FIPS & SSM_TLS -->|CloudFormation conditions| WRITER & VALKEY_PRIMARY
+    REST --> SVC
+    KIN --> SVC
+    SVC --> CACHE
+    CACHE -->|"cache hit"| REST
+    CACHE <-->|"get / set / del"| VALKEY
+    CACHE -->|"cache miss — write"| AUR_W
+    CACHE -->|"cache miss — read"| AUR_R
+    SVC -->|"writes"| AUR_W
+    SVC -->|"reads"| AUR_R
+    SVC -->|"feature flags"| DDB
+    SM -->|"injected at startup"| SVC
+    SSM -->|"injected at startup"| SVC
 ```
+
+**Cache Strategy:**
+- **Pattern**: Cache-aside — read from Valkey first; on miss, query Aurora and populate cache
+- **Write-through invalidation**: All mutations (create / update / delete / status change) purge affected BU-scoped cache keys
+- **JWKS L2 cache**: Also stored in Valkey (15–30d TTL), separate from API response cache
 
 **Data Store Inventory:**
 
 | Store | Type | Purpose | Encryption | HA |
 |-------|------|---------|-----------|-----|
-| Aurora MySQL (writer) | AWS RDS Aurora | Persistent write path — all mutations | KMS at rest, TLS conditional | Multi-AZ automatic failover |
-| Aurora MySQL (reader x2) | AWS RDS Aurora | Persistent read path — list/search queries | KMS at rest, TLS conditional | Auto-promoted on writer failure |
-| ElastiCache Valkey | Redis-compatible | API response cache + JWKS L2 cache | AES at rest, TLS conditional | Multi-AZ replica + auto-failover |
+| Aurora MySQL (writer) | AWS RDS Aurora | All write operations | KMS at rest, TLS conditional | Multi-AZ auto-failover |
+| Aurora MySQL (reader ×2) | AWS RDS Aurora | Read / search queries | KMS at rest, TLS conditional | Auto-promoted on writer failure |
+| ElastiCache Valkey | Redis-compatible | API response cache + JWKS L2 cache | AES at rest, TLS conditional | Multi-AZ replica |
 | DynamoDB | AWS DynamoDB | Feature toggles | AWS-managed | Fully managed |
 | Secrets Manager | AWS Secrets | DB credentials | KMS | Fully managed |
-| SSM Parameter Store | AWS SSM | Runtime config endpoints and flags | AWS-managed | Fully managed |
+| SSM Parameter Store | AWS SSM | Runtime endpoints + FIPS/TLS flags | AWS-managed | Fully managed |
+
+---
+
+---
+
+## 9. Database Design (Entity Relationship Diagram)
+
+Derived from JPA entities in `src/main/java/com/nice/cxone/agentprofiles/jpa/entities/`.
+Schema is per-tenant: `agentprofiles_schema_tenant_{tenantId}`.
+
+```mermaid
+erDiagram
+    agent_profiles {
+        BIGINT      id              PK
+        BIGINT      bus_id          "BU / tenant identifier"
+        VARCHAR     name            "Profile display name (unique per BU)"
+        VARCHAR     status          "ACTIVE | INACTIVE"
+        TIMESTAMP   created_at
+        TIMESTAMP   updated_at
+    }
+
+    agent_profile_configuration {
+        BIGINT      profile_id      PK,FK
+        VARCHAR     config_key      PK
+        TEXT        config_value
+    }
+
+    agent_profile_teams_map {
+        BIGINT      profile_id      PK,FK
+        BIGINT      team_id         PK
+    }
+
+    assignable_configurations {
+        BIGINT      id              PK
+        VARCHAR     name
+        VARCHAR     type
+        TEXT        default_value
+    }
+
+    assignable_configurations_elements {
+        BIGINT      id              PK
+        BIGINT      config_id       FK
+        VARCHAR     element_id
+        TEXT        value
+    }
+
+    assignable_configurations_dependency_elements {
+        BIGINT      element_id      PK,FK
+        BIGINT      dependency_id   PK
+    }
+
+    tenant_schema {
+        BIGINT      id              PK
+        VARCHAR     tenant_id       "CXone tenantId"
+        VARCHAR     schema_name     "agentprofiles_schema_tenant_{tenantId}"
+    }
+
+    agent_profiles ||--o{ agent_profile_configuration : "has"
+    agent_profiles ||--o{ agent_profile_teams_map     : "assigned to"
+    assignable_configurations ||--o{ assignable_configurations_elements : "has elements"
+    assignable_configurations_elements ||--o{ assignable_configurations_dependency_elements : "has dependencies"
+```
+
+**Table Descriptions:**
+
+| Table | PK | Description |
+|-------|-----|-------------|
+| `agent_profiles` | `id` | Core profile entity. One profile per named configuration set. `bus_id` provides BU-level tenant isolation. `name` unique per BU. |
+| `agent_profile_configuration` | `(profile_id, config_key)` | Key-value settings attached to a profile. Composite PK. Deleted and re-inserted on profile update. |
+| `agent_profile_teams_map` | `(profile_id, team_id)` | Junction table — many-to-many between profiles and CXone teams. `team_id` references external CXone team IDs (not a FK to a local table). |
+| `assignable_configurations` | `id` | Catalog of available configuration types that can be included in a profile (e.g. desktop widgets, tool availability). |
+| `assignable_configurations_elements` | `id` | Specific selectable elements within an assignable configuration (e.g. individual tools/options). |
+| `assignable_configurations_dependency_elements` | `(element_id, dependency_id)` | Dependency graph between configuration elements — an element may require another element to be selected. |
+| `tenant_schema` | `id` | Registry mapping `tenantId` → schema name for dynamic schema routing. |
+
+**Multi-tenancy Note:**  
+The `tenant_schema` table is queried at request time to determine which per-tenant MySQL schema to use (`agentprofiles_schema_tenant_{tenantId}`). This is implemented via Spring's `AbstractRoutingDataSource` pattern — the tenant schema name is resolved from the JWT `tenantId` claim and set as the active datasource route.
+
+**Audit Fields:**  
+All mutable tables extend `MappedCreatedUpdatedEntity` which provides `created_at` and `updated_at` timestamps managed by JPA lifecycle callbacks (`@PrePersist`, `@PreUpdate`).
 
 ---
 
