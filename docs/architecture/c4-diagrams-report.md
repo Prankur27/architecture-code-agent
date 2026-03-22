@@ -4,10 +4,10 @@ Generated from Architecture Analysis Report — March 22, 2026
 ---
 
 ## Diagram Index
-1. [L1: System Context Diagram](#1-l1-system-context-diagram)
-2. [L2: Container Diagram](#2-l2-container-diagram)
-3. [L3: Component Diagram — Backend API](#3-l3-component-diagram--backend-api)
-4. [L3: Component Diagram — Frontend Application](#4-l3-component-diagram--frontend-application)
+1. [C1: System Context Diagram](#1-c1-system-context-diagram)
+2. [C2: Container Diagram](#2-c2-container-diagram)
+3. [C3: Component Diagram — Backend API](#3-c3-component-diagram--backend-api)
+4. [C3: Component Diagram — Frontend Application](#4-c3-component-diagram--frontend-application)
 5. [Deployment Diagram](#5-deployment-diagram)
 6. [Security Architecture Diagram](#6-security-architecture-diagram)
 7. [CI/CD Pipeline Diagram](#7-cicd-pipeline-diagram)
@@ -16,11 +16,11 @@ Generated from Architecture Analysis Report — March 22, 2026
 
 ---
 
-## 1. L1: System Context Diagram
+## 1. C1: System Context Diagram
 
 ```mermaid
 C4Context
-  title System Context Diagram — Agent Profiles (NICE CXone)
+  title C1: System Context Diagram — Agent Profiles (NICE CXone)
 
   Person(adminUser, "Contact Center Admin", "Configures agent desktop profiles and assigns them to teams via the CXone Admin UI")
   Person(cxaAgent, "CXone Agent (CXA)", "Reads their assigned agent profile at login to configure their desktop experience")
@@ -60,11 +60,11 @@ C4Context
 
 ---
 
-## 2. L2: Container Diagram
+## 2. C2: Container Diagram
 
 ```mermaid
 C4Container
-  title Container Diagram — Agent Profiles System
+  title C2: Container Diagram — Agent Profiles System
 
   Person(adminUser, "Contact Center Admin", "")
   Person(cxaAgent, "CXone Agent", "")
@@ -128,72 +128,118 @@ C4Container
 
 ---
 
-## 3. L3: Component Diagram — Backend API
+## 3. C3: Component Diagram — Backend API
 
 ```mermaid
-C4Component
-  title Component Diagram — Agent Profiles API (Backend)
+flowchart LR
+    %% ── External Systems ───────────────────────────────────────────────
+    subgraph EXT["External Systems"]
+        direction TB
+        CX_AUTH(["CXone Auth\nJWKS Endpoint"])
+        CX_PLAT(["CXone Platform API\n/user/permissions\n/agents  /teams"])
+        KINESIS_IN(["AWS Kinesis\nTeamData + userManagement"])
+    end
 
-  Container_Boundary(backendAPI, "Agent Profiles API — Spring Boot Application") {
+    %% ── Controller Layer ────────────────────────────────────────────────
+    subgraph CTL["Controller Layer  [Spring @RestController]"]
+        direction TB
+        C1["AgentProfilesController\n/profiles — CRUD + teams"]
+        C2["AssignableConfigurationsController\n/assignable-configurations"]
+        C3["GetAgentProfileForCXAController\n/cxa/profiles  (v1)"]
+        C4["GetAgentProfileCXAControllerV2\n/cxa/v2/profiles  (v2)"]
+    end
 
-    Component(appEntry, "App.java", "Spring Boot @SpringBootApplication", "Application entry point. Initialises Spring context.")
-    Component(appConfig, "AppConfiguration.java", "Spring @Configuration", "Wires all beans: HTTP clients, cache, datasource routing, Resilience4j, OTLP, Kinesis.")
+    %% ── Auth / AOP Layer ────────────────────────────────────────────────
+    subgraph AUTH["Auth Layer  [Spring AOP]"]
+        direction TB
+        AOP["AuthAspect\n@Around @Authorized"]
+        ASVC["AuthService\nJWT parse · claims extract\nNimbus JOSE+JWT"]
+        JWKS_C["JWKS Cache\nL1 Caffeine 6-12h\nL2 Persistent 15-30d"]
+        BAD["Bad Kid Cache\nCaffeine 5min"]
+    end
 
-    Component(agentProfilesController, "AgentProfilesController", "Spring @RestController — /profiles", "Handles CRUD endpoints for agent profiles and team assignments. Applies @Authorized and @RateLimiter.")
-    Component(assignableConfigController, "AssignableConfigurationsController", "Spring @RestController — /assignable-configurations", "Exposes the catalog of assignable configuration items.")
-    Component(cxaControllerV1, "GetAgentProfileForCXAController", "Spring @RestController — /cxa/profiles", "CXone Agent v1 profile fetch endpoint.")
-    Component(cxaControllerV2, "GetAgentProfileCXAControllerV2", "Spring @RestController — /cxa/v2/profiles", "CXone Agent v2 profile fetch endpoint.")
+    %% ── Service Layer ───────────────────────────────────────────────────
+    subgraph SVC["Service Layer  [Spring @Service]"]
+        direction TB
+        AGSVC["AgentProfilesServiceImpl\nCore business logic"]
+        CSVC["CacheResponseServiceImpl\nCache-aside read/write/invalidate"]
+        PSVC["PlatformApiConsumerServiceImpl\nHTTP client + Circuit Breaker"]
+    end
 
-    Component(authAspect, "AuthAspect", "Spring AOP @Aspect @Around @Authorized", "Intercepts all @Authorized controller methods. Extracts JWT, calls AuthService, checks required permissions. Throws 401/403 on failure.")
-    Component(authService, "AuthService", "Spring @Service", "Parses JWT (Nimbus JOSE), extracts userId/buId/tenantId/role from claims. Calls PlatformApiConsumerService to resolve user permissions.")
+    %% ── Repository Layer ────────────────────────────────────────────────
+    subgraph REPO["Repository Layer  [Spring @Repository / JPA]"]
+        direction TB
+        APDAO["AgentProfilesDaoImpl\nRead/write replica routing"]
+        TMDao["AgentProfileTeamsMapDaoImpl\nJunction table access"]
+    end
 
-    Component(agentProfilesService, "AgentProfilesServiceImpl", "Spring @Service — IAgentProfilesService", "Core business logic: create/update/delete profiles, manage team assignments, status updates, search/filter. Orchestrates DAO + Cache + Platform calls.")
-    Component(cacheService, "CacheResponseServiceImpl", "Spring @Service — ICacheResponseService", "Reads and writes API responses to/from Valkey. Key-based invalidation on mutations.")
-    Component(platformService, "PlatformApiConsumerServiceImpl", "Spring @Service — IPlatformApiConsumerService", "HTTP client to CXone Platform API. Fetches user permissions (/user/permissions), agent details (/agents/), team details (/teams). Circuit breaker protected.")
+    %% ── Kinesis Consumer ────────────────────────────────────────────────
+    subgraph KCL["Kinesis Consumer Layer  [KCL Workers]"]
+        direction TB
+        KCON["KinesisConsumer\nKCL worker bootstrap"]
+        TPROC["TeamDataRecordProcessor\nTeam rename/delete sync"]
+        UPROC["UserManagementRecordProcessor\nAgent hire/term/role sync"]
+    end
 
-    Component(agentProfilesDao, "AgentProfilesDaoImpl", "Spring @Repository / JPA", "DB access for AgentProfiles entity. Supports read/write replica routing. Flyway-managed schema.")
-    Component(teamsMapDao, "AgentProfileTeamsMapDaoImpl", "Spring @Repository / JPA", "DB access for AgentProfileTeamsMap junction table.")
+    %% ── Data Stores ─────────────────────────────────────────────────────
+    subgraph DATA["Data Stores"]
+        direction TB
+        AURORA[("Aurora MySQL\nWriter + Reader")]
+        VALKEY[("Valkey Cache\nPort 6379")]
+        DYNAMO[("DynamoDB\nFeature Toggles")]
+    end
 
-    Component(kinesisConsumer, "KinesisConsumer", "KCL Worker Bootstrap", "Starts two KCL workers for TeamData and userManagement streams.")
-    Component(teamDataProcessor, "TeamDataRecordProcessor", "KCL IRecordProcessor", "Processes team create/rename/delete events. Updates AgentProfileTeamsMap in DB.")
-    Component(userMgmtProcessor, "UserManagementRecordProcessor", "KCL IRecordProcessor", "Processes agent hire/terminate/role-change events.")
+    %% ── Edges: Request path ──────────────────────────────────────────────
+    C1 -->|"AOP intercept"| AOP
+    C2 -->|"AOP intercept"| AOP
+    C3 -->|"AOP intercept"| AOP
+    C4 -->|"AOP intercept"| AOP
 
-    Component(jpaEntities, "JPA Entities", "Jakarta @Entity classes", "AgentProfiles, AgentProfileConfiguration, AgentProfileTeamsMap, AssignableConfigurations, TenantSchema, MappedCreatedUpdatedEntity")
-    Component(dtos, "DTOs", "POJO / @Valid annotated", "AgentProfileRequest, AgentProfileStatusChangeRequest, AgentProfileTeamsMapRequestDTO, GetAgentProfilePayloadDTO, SuccessResponseDTO")
-    Component(validationUtils, "AgentProfileValidationUtils", "Utility class", "Input validation for request params and profile request bodies.")
-    Component(logContext, "LogAttributesThreadLocal", "MDC ThreadLocal", "Injects correlation IDs and tenant context into log records.")
-  }
+    AOP --> ASVC
+    ASVC --> JWKS_C
+    ASVC --> BAD
+    JWKS_C -->|"cache miss"| CX_AUTH
+    ASVC -->|"permissions"| PSVC
 
-  ContainerDb(auroraDB, "Aurora MySQL", "", "")
-  ContainerDb(valkeyCache, "Valkey Cache", "", "")
-  ContainerDb(dynamoDB, "DynamoDB", "", "")
-  System_Ext(cxonePlatformAPI, "CXone Platform API", "")
-  System_Ext(cxoneAuth, "CXone Auth / JWKS", "")
-  System_Ext(kinesisStreams, "AWS Kinesis", "")
+    C1 --> AGSVC
+    C2 --> AGSVC
+    C3 --> AGSVC
+    C4 --> AGSVC
 
-  Rel(agentProfilesController, authAspect, "Intercepted by (AOP)")
-  Rel(authAspect, authService, "Delegates JWT validation + permission check")
-  Rel(authService, valkeyCache, "L1/L2 JWKS cache lookup")
-  Rel(authService, cxoneAuth, "Fetch JWKS on cache miss", "HTTPS")
-  Rel(authService, platformService, "Fetch user permissions")
+    AGSVC --> CSVC
+    AGSVC --> APDAO
+    AGSVC --> TMDao
+    AGSVC --> PSVC
 
-  Rel(agentProfilesController, agentProfilesService, "Delegates business operations")
-  Rel(agentProfilesController, validationUtils, "Validates request params")
-  Rel(agentProfilesService, cacheService, "Read/write response cache")
-  Rel(agentProfilesService, agentProfilesDao, "DB reads and writes")
-  Rel(agentProfilesService, teamsMapDao, "Team-profile mapping reads/writes")
-  Rel(agentProfilesService, platformService, "Fetch agent/team data")
-  Rel(cacheService, valkeyCache, "Redis get/set/del", "Redis protocol")
-  Rel(agentProfilesDao, auroraDB, "JDBC queries", "MySQL/TLS")
-  Rel(teamsMapDao, auroraDB, "JDBC queries", "MySQL/TLS")
-  Rel(platformService, cxonePlatformAPI, "REST calls", "HTTPS")
-  Rel(platformService, dynamoDB, "Feature toggle reads", "AWS SDK")
+    CSVC <-->|"get/set/del"| VALKEY
+    APDAO -->|"JDBC"| AURORA
+    TMDao -->|"JDBC"| AURORA
+    PSVC -->|"REST"| CX_PLAT
+    PSVC -->|"feature flags"| DYNAMO
 
-  Rel(kinesisConsumer, kinesisStreams, "Polls shards", "KCL")
-  Rel(kinesisConsumer, teamDataProcessor, "Dispatches team records")
-  Rel(kinesisConsumer, userMgmtProcessor, "Dispatches user records")
-  Rel(teamDataProcessor, agentProfilesDao, "Sync team changes to DB")
-  Rel(userMgmtProcessor, agentProfilesDao, "Sync user changes to DB")
+    %% ── Edges: Kinesis path ───────────────────────────────────────────────
+    KINESIS_IN --> KCON
+    KCON --> TPROC
+    KCON --> UPROC
+    TPROC -->|"DB sync"| APDAO
+    UPROC -->|"DB sync"| APDAO
+
+    %% ── Colour coding ────────────────────────────────────────────────────
+    classDef extStyle  fill:#6c757d,color:#fff,stroke:#495057
+    classDef ctlStyle  fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef authStyle fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef svcStyle  fill:#198754,color:#fff,stroke:#146c43
+    classDef repoStyle fill:#fd7e14,color:#fff,stroke:#ca6510
+    classDef kclStyle  fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef dataStyle fill:#0dcaf0,color:#000,stroke:#0aa2c0
+
+    class CX_AUTH,CX_PLAT,KINESIS_IN extStyle
+    class C1,C2,C3,C4 ctlStyle
+    class AOP,ASVC,JWKS_C,BAD authStyle
+    class AGSVC,CSVC,PSVC svcStyle
+    class APDAO,TMDao repoStyle
+    class KCON,TPROC,UPROC kclStyle
+    class AURORA,VALKEY,DYNAMO dataStyle
 ```
 
 **Description**: The backend API is composed of a thin controller layer (with AOP-injected auth), a thick service layer (`AgentProfilesServiceImpl` orchestrates all business logic), and a repository layer backed by HikariCP-pooled dual datasource (write/read replicas). Two KCL-based Kinesis workers run as background threads within the same process, processing team and user change events asynchronously.
@@ -210,55 +256,95 @@ C4Component
 
 ---
 
-## 4. L3: Component Diagram — Frontend Application
+## 4. C3: Component Diagram — Frontend Application
 
 ```mermaid
-C4Component
-  title Component Diagram — Agent Profiles MFE (Angular)
+flowchart TB
+    %% ── Shell / Host ─────────────────────────────────────────────────────
+    SHELL(["CXone Platform Shell\nModule Federation Host"])
 
-  Container_Boundary(angularMFE, "Agent Profiles MFE — Angular Web Component") {
+    %% ── Bootstrap Layer ──────────────────────────────────────────────────
+    subgraph BOOT["Bootstrap Layer"]
+        direction LR
+        APP["AppModule\n@NgModule + @angular/elements\nRegisters Web Component"]
+        INIT["APP_INITIALIZER Chain\nLocalization · Config · MFE setup"]
+        ROUTER["Angular Router\nLazy-loaded routes"]
+    end
 
-    Component(appModule, "AppModule / bootstrap", "Angular @NgModule + @angular/elements", "Root module. Registers agent-profile-app as a Web Component. Registers HTTP interceptors. Configures app initializer chain.")
+    %% ── UI Components ────────────────────────────────────────────────────
+    subgraph UI["UI Components  [Angular @Component]"]
+        direction LR
+        COMP_LIST["AgentProfilesComponent\n/agent-profiles\nList · Search · Paginate · Status"]
+        COMP_EDIT["CreateEditAgentProfileComponent\n/create-edit-agent-profile\nCreate / Edit form"]
+        COMP_DUP["DuplicateDesktopProfileComponent\n/duplicate-desktop-profile"]
+        COMP_TEAM["TeamsTabComponent\n/teams-tab\nTeam assignment"]
+    end
 
-    Component(appInitializer, "App Initializer Chain", "APP_INITIALIZER factory", "Runs on app bootstrap: LocalizationInitializer (i18next), ConfigurationService, WebAppInitializerService (MFE setup, hide nav flags, mfeActivateGuard).")
+    %% ── Services ─────────────────────────────────────────────────────────
+    subgraph SVCS["Service Layer  [Angular @Injectable]"]
+        direction LR
+        PSVC["ProfileService\nDomain logic · RxJS observables\ncreate · update · status · teams"]
+        ASVC["APIService\nHTTP abstraction\nGET / POST / PUT / DELETE"]
+    end
 
-    Component(appRoutes, "AppRoutes / AppRoutingModule", "Angular Router", "Defines lazy-loaded routes: agent-profiles list, create/edit profile, duplicate profile, teams tab.")
+    %% ── Interceptors ─────────────────────────────────────────────────────
+    subgraph INTER["HTTP Interceptors  [Angular HTTP_INTERCEPTORS]"]
+        direction LR
+        REQ["CXOneHttpRequestInterceptor\nInjects Bearer token · tenant headers"]
+        RES["CXOneHttpResponseInterceptor\nError normalisation"]
+        SPIN["AppSpinnerInterceptor\nGlobal loading state"]
+    end
 
-    Component(agentProfilesComponent, "AgentProfilesComponent", "Angular @Component — /agent-profiles", "Main profile list view. Handles pagination, search, status filter, sort, activate/deactivate actions. Consumes ProfileService.")
-    Component(createEditComponent, "CreateEditAgentProfileComponent", "Angular @Component — /create-edit-agent-profile", "Form for creating and editing an agent profile. Binds to assignable configuration catalog.")
-    Component(duplicateComponent, "DuplicateDesktopProfileComponent", "Angular @Component — /duplicate-desktop-profile", "Workflow for duplicating an existing profile.")
-    Component(teamsTabComponent, "TeamsTabComponent", "Angular @Component — /teams-tab", "Team assignment tab. Lists and modifies teams assigned to a profile.")
+    %% ── Platform Services ────────────────────────────────────────────────
+    subgraph PLAT["CXone Platform Services  [@niceltd/cxone-*]"]
+        direction LR
+        CONFIG["ConfigurationService\nTenant context · env URLs"]
+        TENANT["TenantCrossDomainParamsService\nAuth token provider"]
+        HTTPU["HttpUtils\nWrapped Angular HttpClient"]
+    end
 
-    Component(profileService, "ProfileService", "Angular @Injectable service", "Business logic + state for profile operations. Wraps APIService with domain methods: getProfilesData, getDesktopProfileById, createDesktopProfile, updateDesktopProfile, updateProfileStatus, updateDesktopProfileAssignedTeams.")
-    Component(apiService, "APIService", "Angular @Injectable service", "HTTP abstraction. Wraps HttpUtils with typed GET/POST/PUT/DELETE to /agent-profiles base URL.")
-    Component(apiConstants, "API_CONSTANTS", "TypeScript constants module", "Centralises all backend API URL builder functions.")
+    %% ── Backend ──────────────────────────────────────────────────────────
+    BACKEND(["Agent Profiles API\nJava 17 / Spring Boot\n/agent-profiles/v1"])
 
-    Component(httpInterceptors, "HTTP Interceptors", "Angular HTTP_INTERCEPTORS", "CXOneHttpRequestInterceptor (injects auth token + tenant headers), CXOneHttpResponseInterceptor (error handling), AppSpinnerInterceptor (loading state).")
+    %% ── Edges ────────────────────────────────────────────────────────────
+    SHELL -->|"Module Federation load"| APP
+    APP --> INIT
+    APP --> ROUTER
+    ROUTER --> COMP_LIST
+    ROUTER --> COMP_EDIT
+    ROUTER --> COMP_DUP
+    ROUTER --> COMP_TEAM
 
-    Component(platformServices, "CXone Platform Services", "@niceltd/cxone-core-services + cxone-client-platform-services", "ConfigurationService, TenantCrossDomainParamsService, HttpUtils. Provides auth tokens, tenant context, localized HTTP client.")
+    COMP_LIST --> PSVC
+    COMP_EDIT --> PSVC
+    COMP_DUP  --> PSVC
+    COMP_TEAM --> PSVC
 
-    Component(sharedModels, "Shared Models", "TypeScript interfaces / src/models", "Profile, AgentProfilesResponse, AgentProfileApi, and other domain types.")
+    PSVC --> ASVC
+    ASVC --> REQ
+    REQ --> RES --> SPIN
 
-    Component(i18n, "i18n / Localization", "angular-i18next + @niceltd/sol/translation", "Internationalisation support. Locale initialised at app startup via LocalizationInitializer.")
-  }
+    REQ -->|"reads token"| TENANT
+    REQ -->|"reads config"| CONFIG
+    ASVC --> HTTPU
+    HTTPU -->|"HTTPS/REST"| BACKEND
 
-  ContainerDb(backendAPI, "Agent Profiles API", "Java 17 / Spring Boot", "")
-  System_Ext(cxoneShell, "CXone Platform Shell", "MFE host — provides auth, tenant context, navigation")
+    %% ── Colour coding ────────────────────────────────────────────────────
+    classDef shellStyle  fill:#6c757d,color:#fff,stroke:#495057
+    classDef bootStyle   fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef uiStyle     fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef svcStyle    fill:#198754,color:#fff,stroke:#146c43
+    classDef interStyle  fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef platStyle   fill:#fd7e14,color:#fff,stroke:#ca6510
+    classDef beStyle     fill:#0dcaf0,color:#000,stroke:#0aa2c0
 
-  Rel(cxoneShell, appModule, "Loads Web Component via Module Federation", "HTTPS")
-  Rel(appModule, appInitializer, "Runs on bootstrap")
-  Rel(appModule, appRoutes, "Activates routing")
-  Rel(appRoutes, agentProfilesComponent, "Lazy loads on /agent-profiles")
-  Rel(appRoutes, createEditComponent, "Lazy loads on /create-edit-agent-profile")
-  Rel(appRoutes, duplicateComponent, "Lazy loads on /duplicate-desktop-profile")
-  Rel(appRoutes, teamsTabComponent, "Lazy loads on /teams-tab")
-  Rel(agentProfilesComponent, profileService, "Calls for data")
-  Rel(createEditComponent, profileService, "Calls for create/update/config")
-  Rel(teamsTabComponent, profileService, "Calls for team assignment")
-  Rel(profileService, apiService, "Delegates HTTP calls")
-  Rel(apiService, httpInterceptors, "Passes through interceptor chain")
-  Rel(httpInterceptors, platformServices, "Reads auth token + tenant params")
-  Rel(httpInterceptors, backendAPI, "Authenticated REST calls", "HTTPS/REST")
+    class SHELL shellStyle
+    class APP,INIT,ROUTER bootStyle
+    class COMP_LIST,COMP_EDIT,COMP_DUP,COMP_TEAM uiStyle
+    class PSVC,ASVC svcStyle
+    class REQ,RES,SPIN interStyle
+    class CONFIG,TENANT,HTTPU platStyle
+    class BACKEND beStyle
 ```
 
 **Description**: The Angular MFE is bootstrapped as a Web Component registered via `@angular/elements`. The CXone Shell loads it via Module Federation. The app uses a two-layer service architecture: `ProfileService` for domain logic and `APIService` as an HTTP abstraction. Auth token injection is fully handled by the platform interceptors from `@niceltd/cxone-core-services` — the app never manually handles tokens.
@@ -279,73 +365,91 @@ C4Component
 
 ```mermaid
 flowchart TB
-    subgraph BROWSER["👤 End User Browser (Chrome / Edge)"]
-        MFE_BUNDLE["Agent Profiles MFE\nAngular Web Component\n(loaded from CDN)"]
-    end
+    %% ── User ─────────────────────────────────────────────────────────────
+    USER(["👤 End User Browser\nChrome / Edge"])
 
-    subgraph CDN["☁️ CDN Layer"]
+    %% ── CDN ──────────────────────────────────────────────────────────────
+    subgraph CDN["CDN Layer"]
         CF["CloudFront + S3\nStatic MFE bundle\nHTTPS only"]
     end
 
-    subgraph AWS["AWS Cloud — us-west-2"]
-        subgraph VPC["CoreNetwork-VPC (Shared Platform VPC)"]
-            ALB["Application Load Balancer\nTLS termination\nRoutes /agent-profiles/*"]
-
-            subgraph PRIVATE["Private Subnets — Az1 + Az2"]
-                ECS["ECS Fargate\nAgent Profiles API\nJava 17 / Spring Boot\nPort: 9001 (app) 8080 (mgmt)\nImage: ECR — github.sha tag"]
-
-                subgraph DATA["Data Layer"]
-                    AURORA_W["Aurora MySQL Writer\ndb.r7g.large\nPort 3306 / TLS"]
-                    AURORA_R1["Aurora MySQL Reader 1\ndb.r7g.large\nAuto-failover"]
-                    AURORA_R2["Aurora MySQL Reader 2\ndb.r7g.large"]
-                end
-
-                subgraph CACHE["Cache Layer"]
-                    VALKEY["ElastiCache Valkey\ncache.m7g.xlarge\nMulti-AZ / Port 6379"]
-                end
-
-                JUMP["EC2 Jump Server\nManagementCIDR only"]
-            end
-        end
-
-        subgraph AWS_MANAGED["AWS Managed Services"]
-            DYNAMO["DynamoDB\nFeature toggle table"]
-            SM["Secrets Manager\n{env}-AgentProfilesSecrets"]
-            SSM["SSM Parameter Store\nEndpoints + flags"]
-            ECR["ECR\n300813158921"]
-            KMS["KMS Key\nagentProfiles-kms-key"]
-            CW["CloudWatch Alarms\nRDS + Valkey metrics"]
-        end
-
-        subgraph KINESIS["Event Streaming"]
-            KTEAM["Kinesis: dev-TeamData"]
-            KUSER["Kinesis: dev-userManagement"]
-        end
+    %% ── Network ──────────────────────────────────────────────────────────
+    subgraph NET["Network Layer  [CXone Platform VPC]"]
+        ALB["Application Load Balancer\nTLS termination\nRoutes /agent-profiles/*"]
     end
 
-    BROWSER -- HTTPS --> CF
-    BROWSER -- HTTPS --> ALB
-    CF -- "Module Federation" --> MFE_BUNDLE
-    ALB -- "HTTP :9001" --> ECS
+    %% ── Compute ──────────────────────────────────────────────────────────
+    subgraph COMPUTE["Compute Layer  [ECS Fargate — Private Subnet Az1/Az2]"]
+        ECS["Agent Profiles API\nJava 17 / Spring Boot\nApp: 9001  Mgmt: 8080\nImage tagged: github.sha"]
+    end
 
-    ECS -- "JDBC write :3306" --> AURORA_W
-    ECS -- "JDBC read :3306" --> AURORA_R1
-    ECS -- "Redis :6379" --> VALKEY
-    ECS -- "AWS SDK" --> DYNAMO
-    ECS -- "startup" --> SM
-    ECS -- "startup" --> SSM
-    ECR -- "image pull" --> ECS
-    KMS -- "encrypts" --> CW
+    %% ── Data ─────────────────────────────────────────────────────────────
+    subgraph DATALAYER["Data Layer  [Private Subnet — Encrypted]"]
+        direction LR
+        AW[("Aurora MySQL\nWriter\ndb.r7g.large  :3306")]
+        AR[("Aurora MySQL\nReader x2\nAuto-failover")]
+        VK[("ElastiCache Valkey\ncache.m7g.xlarge\nMulti-AZ  :6379")]
+    end
 
-    KTEAM -- "KCL poll" --> ECS
-    KUSER -- "KCL poll" --> ECS
+    %% ── AWS Managed ──────────────────────────────────────────────────────
+    subgraph MANAGED["AWS Managed Services"]
+        direction LR
+        DDB[("DynamoDB\nFeature toggles")]
+        SM["Secrets Manager\nDB credentials"]
+        SSM["SSM Param Store\nEndpoints + flags"]
+        ECR["ECR\n300813158921"]
+        KMS["KMS Key\nagentProfiles-kms-key"]
+        CW["CloudWatch Alarms\nRDS + Valkey metrics"]
+    end
 
-    AURORA_W -. "auto-failover" .-> AURORA_R1
-    AURORA_R1 -. "replica" .-> AURORA_R2
-    VALKEY -. "Multi-AZ replica" .-> VALKEY
+    %% ── Events ───────────────────────────────────────────────────────────
+    subgraph EVENTS["Event Streaming  [AWS Kinesis]"]
+        direction LR
+        KT["dev-TeamData\nstream"]
+        KU["dev-userManagement\nstream"]
+    end
 
-    JUMP -- "MySQL :3306" --> AURORA_W
-    JUMP -- "Redis :6379" --> VALKEY
+    %% ── Management ───────────────────────────────────────────────────────
+    JUMP["EC2 Jump Server\nManagementCIDR only"]
+
+    %% ── Edges ────────────────────────────────────────────────────────────
+    USER -->|"HTTPS"| CF
+    USER -->|"HTTPS"| ALB
+    CF  -->|"Module Federation"| USER
+    ALB -->|"HTTP :9001"| ECS
+
+    ECR  -->|"image pull"| ECS
+    ECS  -->|"JDBC write :3306"| AW
+    ECS  -->|"JDBC read :3306"| AR
+    ECS  -->|"Redis :6379"| VK
+    ECS  -->|"AWS SDK"| DDB
+    ECS  -->|"startup"| SM
+    ECS  -->|"startup"| SSM
+    KMS  -->|"encrypts alarms"| CW
+    KT   -->|"KCL poll"| ECS
+    KU   -->|"KCL poll"| ECS
+    AW   -..->|"auto-failover"| AR
+    JUMP -->|"MySQL :3306"| AW
+    JUMP -->|"Redis :6379"| VK
+
+    %% ── Colour coding ────────────────────────────────────────────────────
+    classDef userStyle    fill:#6c757d,color:#fff,stroke:#495057
+    classDef cdnStyle     fill:#fd7e14,color:#fff,stroke:#ca6510
+    classDef netStyle     fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef computeStyle fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef dataStyle    fill:#0dcaf0,color:#000,stroke:#0aa2c0
+    classDef mgmtStyle    fill:#198754,color:#fff,stroke:#146c43
+    classDef eventStyle   fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef jumpStyle    fill:#ffc107,color:#000,stroke:#d39e00
+
+    class USER userStyle
+    class CF cdnStyle
+    class ALB netStyle
+    class ECS computeStyle
+    class AW,AR,VK,DDB dataStyle
+    class SM,SSM,ECR,KMS,CW mgmtStyle
+    class KT,KU eventStyle
+    class JUMP jumpStyle
 ```
 
 **Deployment Inventory:**
@@ -368,81 +472,112 @@ flowchart TB
 ## 6. Security Architecture Diagram
 
 ```mermaid
-flowchart TD
-    subgraph "Internet / Browser"
-        User["👤 Admin User / CXone Agent"]
+flowchart LR
+    %% ── Users ────────────────────────────────────────────────────────────
+    subgraph USERS["Users"]
+        direction TB
+        ADMIN(["Admin\nBrowser"])
+        CXA(["CXone Agent\nDesktop"])
     end
 
-    subgraph "CXone Platform Layer"
-        Shell["CXone Shell\n[TLS 1.2+]"]
-        Auth["CXone Auth / JWKS\n[JWT Issuer]"]
+    %% ── Frontend / CDN ───────────────────────────────────────────────────
+    subgraph FRONT["Frontend / CDN"]
+        direction TB
+        CF["CloudFront + S3\nHTTPS  TLS 1.2+"]
+        SHELL["CXone Shell\nModule Federation host"]
     end
 
-    subgraph "CDN Layer"
-        CF["CloudFront + S3\n[TLS 1.2+]\n[HTTPS only]"]
+    %% ── Network Perimeter ────────────────────────────────────────────────
+    subgraph PERIM["Network Perimeter"]
+        direction TB
+        WAF["WAF / DDoS\nPlatform-managed"]
+        ALB["ALB\nTLS Termination"]
     end
 
-    subgraph "Network Perimeter"
-        WAF["WAF / DDoS Protection\n[Platform-managed — upstream of ALB]"]
-        ALB["Application Load Balancer\n[TLS Termination]\n[HTTPS → HTTP internal]"]
+    %% ── Resilience ───────────────────────────────────────────────────────
+    subgraph RESIL["Resilience Layer"]
+        direction TB
+        RL["Rate Limiter\ncxalimiter  75 req/s"]
+        CB["Circuit Breaker\nuserhub  50% threshold"]
     end
 
-    subgraph "Application Layer  [Private Subnet]"
-        API["Agent Profiles API\n[IAM Role: ServiceAccess-agent-profiles-service-deploy-role]\n[JWT validated on every request]\n[@Authorized AOP]"]
-        CB["Circuit Breaker\n[resilience4j — userhub]\n[50% failure threshold]"]
-        RL["Rate Limiter\n[resilience4j — cxalimiter]\n[75 req/s]"]
+    %% ── Auth ─────────────────────────────────────────────────────────────
+    subgraph AUTHZ["Auth Layer  [AOP]"]
+        direction TB
+        AOP["@Authorized AOP\nJWT validate + RBAC"]
+        JWKS["JWKS Cache\nL1 Caffeine  L2 Persistent"]
+        BADKID["Bad Kid Cache\n5 min TTL"]
+        PERMS["Platform Permissions\n/user/permissions"]
+        CXAUTH(["CXone Auth\nJWKS Endpoint"])
     end
 
-    subgraph "Auth Flow"
-        JWKS_CACHE["JWKS Cache\n[L1: Caffeine 6-12h]\n[L2: Persistent 15-30d]"]
-        BAD_KID["Bad Kid Cache\n[Caffeine 5min / 1000 entries]"]
-        PERMS["Platform Permissions API\n[/user/permissions]"]
+    %% ── Application ──────────────────────────────────────────────────────
+    API["Agent Profiles API\n@Authorized  IAM Role"]
+
+    %% ── Data Layer ───────────────────────────────────────────────────────
+    subgraph DATALAYER["Data Layer  [Private Subnet — Encrypted]"]
+        direction TB
+        AURORA[("Aurora MySQL\nKMS at rest  TLS conditional")]
+        VALKEY[("Valkey Cache\nAES at rest  TLS conditional")]
+        DDB[("DynamoDB\nAWS-managed encryption")]
     end
 
-    subgraph "Data Layer  [Private Subnet — Encrypted]"
-        Aurora["Aurora MySQL\n[KMS encrypted at rest]\n[TLS 1.2 in transit — conditional]\n[Not publicly accessible]\n[30d backup retention]"]
-        Valkey["Valkey Cache\n[At-rest encrypted]\n[TLS in transit — conditional]\n[Multi-AZ]"]
-        DDB["DynamoDB\n[AWS-managed encryption]"]
+    %% ── Secrets ──────────────────────────────────────────────────────────
+    subgraph SECRETS["Secrets & Config"]
+        direction TB
+        SM["Secrets Manager\nDB credentials  KMS"]
+        SSM["SSM Param Store\nFIPS flag  endpoints"]
+        KMS["KMS Key\nSNS + CloudWatch encryption"]
     end
 
-    subgraph "Secrets & Config  [AWS Managed]"
-        SM["Secrets Manager\n[DB credentials]\n[KMS encrypted]"]
-        SSM["SSM Parameter Store\n[FIPS flag, TLS flag, endpoints]"]
-        KMS["KMS Key\n[alias: agentProfiles-kms-key]\n[Key rotation on FIPS envs]\n[SNS + CloudWatch encryption]"]
+    %% ── CI Security Scanning ─────────────────────────────────────────────
+    subgraph SCAN["Security Scanning  [CI/CD]"]
+        direction TB
+        VER["Veracode SAST\nevery push/PR"]
+        BD["BlackDuck SCA\ndependency scan"]
+        SQ["SonarQube\nquality gate"]
     end
 
-    subgraph "Security Scanning  [CI/CD Pipeline]"
-        Veracode["Veracode SAST\n[every push/PR]\n[artifact: ms-agent-profiles-apis-1.0-SNAPSHOT]"]
-        BlackDuck["BlackDuck SCA\n[dependency scan on every build]"]
-        Sonar["SonarQube\n[backend + frontend]\n[quality gate on build]"]
-    end
+    %% ── Edges ────────────────────────────────────────────────────────────
+    ADMIN -->|"HTTPS"| CF
+    ADMIN -->|"HTTPS"| SHELL
+    CXA   -->|"HTTPS"| WAF
+    SHELL -->|"API via proxy"| WAF
+    WAF   --> ALB --> RL --> AOP
+    AOP   --> JWKS
+    JWKS  -->|"miss"| CXAUTH
+    JWKS  --> BADKID
+    AOP   --> CB --> PERMS
+    AOP   --> API
+    API   -->|"read/write"| AURORA
+    API   -->|"cache"| VALKEY
+    API   -->|"feature flags"| DDB
+    API   -->|"startup"| SM
+    API   -->|"startup"| SSM
+    KMS   -->|"encrypts"| AURORA
+    KMS   -->|"encrypts"| VALKEY
+    KMS   -->|"encrypts"| SM
 
-    User -->|HTTPS| Shell
-    User -->|HTTPS| CF
-    Shell -->|Loads MFE via Module Federation| CF
-    Shell -->|API calls via proxy| WAF
-    WAF --> ALB
-    ALB -->|HTTP :9001| RL
-    RL --> API
-    API -->|AOP intercept| JWKS_CACHE
-    JWKS_CACHE -->|cache miss| Auth
-    JWKS_CACHE --> BAD_KID
-    API -->|permission lookup| CB
-    CB --> PERMS
-    API -->|read/write| Aurora
-    API -->|cache| Valkey
-    API -->|feature flags| DDB
-    API -->|startup| SM
-    API -->|startup| SSM
-    KMS -->|encrypts| Aurora
-    KMS -->|encrypts| Valkey
-    KMS -->|encrypts| SM
+    %% ── Colour coding ────────────────────────────────────────────────────
+    classDef userStyle   fill:#6c757d,color:#fff,stroke:#495057
+    classDef frontStyle  fill:#fd7e14,color:#fff,stroke:#ca6510
+    classDef perimStyle  fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef resilStyle  fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef authStyle   fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef apiStyle    fill:#198754,color:#fff,stroke:#146c43
+    classDef dataStyle   fill:#0dcaf0,color:#000,stroke:#0aa2c0
+    classDef secretStyle fill:#ffc107,color:#000,stroke:#d39e00
+    classDef scanStyle   fill:#20c997,color:#000,stroke:#1aa179
 
-    style Veracode fill:#ff9900,color:#000
-    style BlackDuck fill:#ff9900,color:#000
-    style Sonar fill:#4e9a06,color:#fff
-    style KMS fill:#d62728,color:#fff
-    style SM fill:#d62728,color:#fff
+    class ADMIN,CXA userStyle
+    class CF,SHELL frontStyle
+    class WAF,ALB perimStyle
+    class RL,CB resilStyle
+    class AOP,JWKS,BADKID,PERMS,CXAUTH authStyle
+    class API apiStyle
+    class AURORA,VALKEY,DDB dataStyle
+    class SM,SSM,KMS secretStyle
+    class VER,BD,SQ scanStyle
 ```
 
 **Security Controls Summary:**
@@ -466,72 +601,95 @@ flowchart TD
 ## 7. CI/CD Pipeline Diagram
 
 ```mermaid
-flowchart TD
-    subgraph "Developer Workflow"
-        DEV["Developer Push / PR\nto master or versioned branch\n(e.g. 26.2, 26.2.0)"]
-    end
+flowchart LR
+    %% ── Trigger ──────────────────────────────────────────────────────────
+    GIT(["git push / PR\nmaster or 26.x branch"])
 
-    subgraph "GitHub Actions — BackendCI  [BuildPushECR.yaml]"
-        CHECKOUT["1. Checkout Code\n(actions/checkout@v4)"]
-        JDK["2. Setup JDK 17\n(Zulu distribution)"]
-        GRADLE_PERM["3. chmod +x gradlew"]
-        
-        subgraph "Integration Tests  [matrix: dev | test | staging]"
-            INT_TEST["4. ./gradlew test\n-PincludeIntegrationTests\n-PactiveProfile={env}"]
-            UPLOAD_XML["5. Upload Test Results XML\n(30-day retention)"]
-            UPLOAD_HTML["6. Upload Test Report HTML\n(30-day retention)"]
+    %% ── Backend CI ───────────────────────────────────────────────────────
+    subgraph BCI["GitHub Actions — Backend CI  [BuildPushECR.yaml]"]
+        direction TB
+        CO["Checkout + JDK 17 setup"]
+        subgraph TESTS["Integration Tests  [matrix: dev | test | staging]"]
+            IT["./gradlew test\n-PincludeIntegrationTests\n-PactiveProfile={env}"]
         end
-
-        subgraph "Reusable Build Workflow  [acddevops-reusable-workflows]"
-            SONAR["7. SonarQube Scan\n✅ enable-sonar-scan: true"]
-            SQ_GATE{Quality Gate}
-            BLACKDUCK["8. BlackDuck SCA\n✅ enable-blackduck-scan: true\n(dependency scan)"]
-            VERACODE["9. Veracode SAST\n✅ enable-veracode-scan: true\nartifact: ms-agent-profiles-apis-1.0-SNAPSHOT"]
-            SEC_GATE{Security Gate}
-            JIB_BUILD["10. Gradle Build + Jib\n./gradlew build\nJAR: ms-agent-profiles-apis-1.0-SNAPSHOT.jar\nImage tag: git SHA"]
-            ECR_PUSH["11. Push Docker Image to ECR\n300813158921.dkr.ecr.us-west-2.amazonaws.com\nTagged: github.sha"]
-        end
+        SQ["SonarQube scan"]
+        SQG{Quality Gate}
+        BD["BlackDuck SCA"]
+        VER["Veracode SAST"]
+        SECG{Security Gate}
+        JIB["Gradle + Jib build\nJAR to Docker image"]
+        ECR["Push to ECR\nTagged: github.sha"]
     end
 
-    subgraph "GitHub Actions — Infra Deploy  [DeployInfra.yaml]"
-        INFRA_TRIGGER["workflow_dispatch\nInputs: profile (dev/test/perf/staging)\nStack (rds-aurora / valkey / secrets / etc.)"]
-        ENV_APPROVAL["Environment: approval_needed\n⏸ Manual Approval Gate"]
-        AWS_AUTH["OIDC → assume\nServiceAccess-agent-profiles-service-deploy-role"]
-        CFN_DEPLOY["aws-cloudformation-github-deploy\nDeploys selected CFN stack\nno-fail-on-empty-changeset: true"]
+    %% ── Infra Deploy ─────────────────────────────────────────────────────
+    subgraph INFRA["GitHub Actions — Infra Deploy  [DeployInfra.yaml]"]
+        direction TB
+        ITRIG(["workflow_dispatch\nSelect: env + stack"])
+        IAPPR["Manual Approval Gate\nGitHub Env: approval_needed"]
+        IAUTH["OIDC AssumeRole"]
+        CFN["CloudFormation deploy\nSelected stack"]
     end
 
-    subgraph "GitHub Actions — Image Promote  [PromoteImage.yaml / PromoteImageToProd.yaml]"
-        PROMOTE_TRIGGER["workflow_dispatch\nPromote image between environments"]
-        PROD_APPROVAL["⏸ Approval Gate for Production"]
-        ECR_PROMOTE["Promote image tag in ECR\nfrom staging → prod account"]
+    %% ── Image Promote ────────────────────────────────────────────────────
+    subgraph PROMO["GitHub Actions — Image Promotion"]
+        direction TB
+        PTRIG(["workflow_dispatch\nSelect: image tag + target env"])
+        PAPPR["Approval Gate\nProd requires separate workflow"]
+        PECR["ECR: copy image\nsource to target account"]
     end
 
-    subgraph "Jenkins — Frontend CI  [Jenkinsfile]"
-        FE_CHECKOUT["1. Checkout cxone-webapp-agent-profiles@master"]
-        FE_INSTALL["2. npm install"]
-        FE_LINT["3. ESLint + TSLint"]
-        FE_TEST["4. Unit Tests (Karma/Jasmine)\nCoverage: LCOV → target/reports/coverage"]
-        FE_SONAR["5. SonarQube Scan\nsonar-project.properties"]
-        FE_BUILD["6. ng build / webpack --config webpack.prod.config.js"]
-        FE_DEPLOY["7. Deploy to CDN / S3\n(pipeline.properties)"]
+    %% ── Frontend CI ──────────────────────────────────────────────────────
+    subgraph FCI["Jenkins — Frontend CI  [Jenkinsfile]"]
+        direction TB
+        FIN["npm install"]
+        FLINT["ESLint + TSLint"]
+        FTEST["Unit tests\nKarma / Jasmine  LCOV coverage"]
+        FSQ["SonarQube scan"]
+        FBUILD["ng build\nwebpack.prod.config.js"]
+        FDEP["Deploy to CDN / S3"]
     end
 
-    DEV --> CHECKOUT
-    CHECKOUT --> JDK --> GRADLE_PERM --> INT_TEST
-    INT_TEST --> UPLOAD_XML & UPLOAD_HTML
-    UPLOAD_XML & UPLOAD_HTML --> SONAR
-    SONAR --> SQ_GATE
-    SQ_GATE -->|Fail| SQFAIL["❌ Build blocked\nQuality gate failed"]
-    SQ_GATE -->|Pass| BLACKDUCK --> VERACODE
-    VERACODE --> SEC_GATE
-    SEC_GATE -->|Fail| SECFAIL["❌ Build blocked\nSecurity findings"]
-    SEC_GATE -->|Pass| JIB_BUILD --> ECR_PUSH
+    %% ── Blocked terminals ────────────────────────────────────────────────
+    SQBLOCK(["Blocked\nQuality gate"])
+    SECBLOCK(["Blocked\nSecurity findings"])
 
-    INFRA_TRIGGER --> ENV_APPROVAL --> AWS_AUTH --> CFN_DEPLOY
+    %% ── Edges: Backend CI ────────────────────────────────────────────────
+    GIT --> CO --> IT --> SQ
+    SQ  --> SQG
+    SQG -->|"Fail"| SQBLOCK
+    SQG -->|"Pass"| BD --> VER --> SECG
+    SECG -->|"Fail"| SECBLOCK
+    SECG -->|"Pass"| JIB --> ECR
 
-    PROMOTE_TRIGGER --> PROD_APPROVAL --> ECR_PROMOTE
+    %% ── Edges: Infra ─────────────────────────────────────────────────────
+    ITRIG --> IAPPR --> IAUTH --> CFN
 
-    DEV --> FE_CHECKOUT --> FE_INSTALL --> FE_LINT --> FE_TEST --> FE_SONAR --> FE_BUILD --> FE_DEPLOY
+    %% ── Edges: Promote ───────────────────────────────────────────────────
+    ECR --> PTRIG --> PAPPR --> PECR
+
+    %% ── Edges: Frontend ──────────────────────────────────────────────────
+    GIT --> FIN --> FLINT --> FTEST --> FSQ --> FBUILD --> FDEP
+
+    %% ── Colour coding ────────────────────────────────────────────────────
+    classDef trigStyle   fill:#6c757d,color:#fff,stroke:#495057
+    classDef ciStyle     fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef secStyle    fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef gateStyle   fill:#fd7e14,color:#000,stroke:#ca6510
+    classDef buildStyle  fill:#198754,color:#fff,stroke:#146c43
+    classDef infraStyle  fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef promoStyle  fill:#0dcaf0,color:#000,stroke:#0aa2c0
+    classDef feStyle     fill:#ffc107,color:#000,stroke:#d39e00
+    classDef blockStyle  fill:#dc3545,color:#fff,stroke:#b02a37
+
+    class GIT trigStyle
+    class CO,IT ciStyle
+    class SQ,BD,VER secStyle
+    class SQG,SECG gateStyle
+    class JIB,ECR buildStyle
+    class ITRIG,IAPPR,IAUTH,CFN infraStyle
+    class PTRIG,PAPPR,PECR promoStyle
+    class FIN,FLINT,FTEST,FSQ,FBUILD,FDEP feStyle
+    class SQBLOCK,SECBLOCK blockStyle
 ```
 
 **Pipeline Stage Descriptions:**
@@ -555,40 +713,53 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph INGRESS["Data Ingress"]
-        REST["REST API"]
-        KIN["Kinesis Streams\n(TeamData + userManagement)"]
+        direction TB
+        REST["REST API\nHTTPS/JSON"]
+        KIN["Kinesis Streams\nTeamData + userManagement"]
     end
 
     subgraph APP["Application Layer"]
-        SVC["AgentProfilesServiceImpl"]
-        CACHE["CacheResponseServiceImpl\n(cache-aside)"]
+        direction TB
+        SVC["AgentProfilesServiceImpl\nBusiness logic + validation"]
+        CACHE["CacheResponseServiceImpl\nCache-aside pattern"]
     end
 
     subgraph STORES["Data Stores"]
         direction TB
-        AUR_W[("Aurora MySQL\nWriter\nPort 3306")]
-        AUR_R[("Aurora MySQL\nReader x2\nPort 3306")]
-        VALKEY[("ElastiCache Valkey\nPort 6379\nMulti-AZ")]
-        DDB[("DynamoDB\nFeature Toggles")]
+        AW[("Aurora MySQL\nWriter  :3306")]
+        AR[("Aurora MySQL\nReader x2  :3306")]
+        VK[("Valkey Cache\nPort 6379  Multi-AZ")]
+        DDB[("DynamoDB\nFeature toggles")]
     end
 
-    subgraph CONFIG["Config & Secrets (startup)"]
+    subgraph CONFIG["Config & Secrets  [injected at startup]"]
+        direction TB
         SM["Secrets Manager\nDB credentials"]
         SSM["SSM Param Store\nEndpoints + flags"]
     end
 
-    REST --> SVC
-    KIN --> SVC
-    SVC --> CACHE
+    REST  --> SVC
+    KIN   --> SVC
+    SVC   --> CACHE
     CACHE -->|"cache hit"| REST
-    CACHE <-->|"get / set / del"| VALKEY
-    CACHE -->|"cache miss — write"| AUR_W
-    CACHE -->|"cache miss — read"| AUR_R
-    SVC -->|"writes"| AUR_W
-    SVC -->|"reads"| AUR_R
-    SVC -->|"feature flags"| DDB
-    SM -->|"injected at startup"| SVC
-    SSM -->|"injected at startup"| SVC
+    CACHE <-->|"get / set / del"| VK
+    CACHE -->|"miss — write"| AW
+    CACHE -->|"miss — read"| AR
+    SVC   -->|"writes"| AW
+    SVC   -->|"reads"| AR
+    SVC   -->|"feature flags"| DDB
+    SM    -->|"startup"| SVC
+    SSM   -->|"startup"| SVC
+
+    classDef inStyle  fill:#6c757d,color:#fff,stroke:#495057
+    classDef appStyle fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef dbStyle  fill:#0dcaf0,color:#000,stroke:#0aa2c0
+    classDef cfgStyle fill:#ffc107,color:#000,stroke:#d39e00
+
+    class REST,KIN inStyle
+    class SVC,CACHE appStyle
+    class AW,AR,VK,DDB dbStyle
+    class SM,SSM cfgStyle
 ```
 
 **Cache Strategy:**
