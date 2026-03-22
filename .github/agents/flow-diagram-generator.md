@@ -38,7 +38,32 @@ From the analysis report, enumerate all flows across these categories:
 
 ---
 
-### Step 3: Generate Authentication & Authorization Flows
+### Diagram Style Guidelines
+
+All `flowchart` diagrams must follow these conventions for clarity and readability:
+
+- **Use `flowchart LR`** (left-to-right) for pipeline, event, and multi-actor flows to reduce line crossings
+- **Use `flowchart TD`** only for simple linear waterfalls (e.g., error retry)
+- **Use named subgraph zones** to group related actors/components (avoids spaghetti lines)
+- **Use `direction TB`** inside subgraphs so internal steps read top-to-bottom
+- **Apply `classDef` colour classes** — never use inline `style X fill:...` declarations
+- Keep edge labels short (quoted strings, max 5 words)
+
+**Standard colour palette:**
+```
+classDef userStyle    fill:#6c757d,color:#fff   %% Users / external actors
+classDef uiStyle      fill:#fd7e14,color:#fff   %% Frontend / UI
+classDef gwStyle      fill:#6f42c1,color:#fff   %% Gateway / network
+classDef svcStyle     fill:#0d6efd,color:#fff   %% Backend services
+classDef authStyle    fill:#dc3545,color:#fff   %% Auth / security
+classDef cacheStyle   fill:#20c997,color:#000   %% Cache
+classDef dbStyle      fill:#0dcaf0,color:#000   %% Data stores
+classDef queueStyle   fill:#ffc107,color:#000   %% Queues / events
+classDef successStyle fill:#198754,color:#fff   %% Success / done
+classDef errorStyle   fill:#dc3545,color:#fff   %% Errors / failures
+```
+
+---
 
 #### 3.1 User Login Flow
 ```mermaid
@@ -142,31 +167,58 @@ sequenceDiagram
 For each identified async/event-driven flow:
 
 ```mermaid
-flowchart TD
-    subgraph "Producer Service"
-        A[Business Logic] -->|Publish Event| B[SQS/SNS/Kafka Producer]
+flowchart LR
+    subgraph PROD["Producer Service"]
+        direction TB
+        BL["Business Logic"]
+        PUB["Event Publisher"]
     end
 
-    subgraph "Message Broker"
-        B --> C{Topic/Queue}
-        C -->|Dead Letter| DLQ[Dead Letter Queue]
+    subgraph BROKER["Message Broker  [SQS / SNS / Kafka]"]
+        direction TB
+        TOPIC{"Topic / Queue"}
+        DLQ["Dead Letter Queue"]
     end
 
-    subgraph "Consumer Service"
-        C -->|Subscribe / Poll| D[Message Consumer]
-        D --> E{Idempotency Check}
-        E -->|Already processed| F[Skip]
-        E -->|New message| G[Process Event]
-        G --> H[Update Database]
-        G --> I[Trigger Downstream Actions]
-        G -->|Error| J[Retry with backoff]
-        J -->|Max retries exceeded| DLQ
+    subgraph CONS["Consumer Service"]
+        direction TB
+        SUB["Message Consumer"]
+        IDEM{"Idempotency\nCheck"}
+        PROC["Process Event"]
+        UPD["Update Database"]
+        DOWN["Trigger Downstream"]
+        RETRY["Retry w/ backoff"]
     end
 
-    subgraph "DLQ Handler"
-        DLQ --> K[DLQ Monitor / Alerting]
-        K --> L[Manual reprocessing / investigation]
+    subgraph DLQ_HANDLER["DLQ Handler"]
+        direction TB
+        MON["DLQ Monitor / Alert"]
+        MANUAL["Manual reprocessing"]
     end
+
+    BL --> PUB --> TOPIC
+    TOPIC -->|"subscribe / poll"| SUB
+    TOPIC -->|"dead letter"| DLQ
+    SUB --> IDEM
+    IDEM -->|"already processed"| SKIP(["Skip"])
+    IDEM -->|"new message"| PROC
+    PROC --> UPD
+    PROC --> DOWN
+    PROC -->|"error"| RETRY
+    RETRY -->|"max retries"| DLQ
+    DLQ --> MON --> MANUAL
+
+    classDef prodStyle    fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef brokerStyle  fill:#ffc107,color:#000,stroke:#d39e00
+    classDef consStyle    fill:#198754,color:#fff,stroke:#146c43
+    classDef dlqStyle     fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef skipStyle    fill:#6c757d,color:#fff,stroke:#495057
+
+    class BL,PUB prodStyle
+    class TOPIC brokerStyle
+    class DLQ,MON,MANUAL dlqStyle
+    class SUB,IDEM,PROC,UPD,DOWN,RETRY consStyle
+    class SKIP skipStyle
 ```
 
 ---
@@ -176,30 +228,75 @@ flowchart TD
 Show the internal journey of an HTTP request through the backend:
 
 ```mermaid
-flowchart TD
-    A[Incoming HTTP Request] --> B[API Gateway / Load Balancer]
-    B --> C{WAF Rules Check}
-    C -->|Blocked| BLOCK[403 Forbidden]
-    C -->|Allowed| D[Rate Limiter Middleware]
-    D -->|Exceeded| RATE[429 Too Many Requests]
-    D -->|OK| E[Auth Middleware]
-    E -->|Invalid token| AUTH[401 Unauthorized]
-    E -->|Valid| F[Request Validation Middleware]
-    F -->|Invalid body/params| VALID[400 Bad Request]
-    F -->|Valid| G[Route Handler / Controller]
-    G --> H[Service Layer]
-    H --> I{Cache Check}
-    I -->|Hit| J[Return Cached Data]
-    I -->|Miss| K[Repository Layer]
-    K --> L[Database]
-    L --> M[Map to Domain Model]
-    M --> N[Apply Business Logic]
-    N --> O{Side Effects?}
-    O -->|Yes| P[Publish Event / Call External API]
-    O -->|No| Q[Prepare Response DTO]
-    P --> Q
-    Q --> R[Logging & Metrics Middleware]
-    R --> S[200/201 Response]
+flowchart LR
+    REQ(["Incoming HTTP Request"])
+
+    subgraph PERIM["Perimeter"]
+        direction TB
+        APIGW["API Gateway / ALB"]
+        WAF{"WAF Rules"}
+        BLOCK403(["403 Forbidden"])
+    end
+
+    subgraph MIDDLEWARE["Middleware Chain"]
+        direction TB
+        RATE["Rate Limiter"]
+        RATE429(["429 Too Many"])
+        AUTH["Auth Middleware\nJWT validation"]
+        AUTH401(["401 Unauthorized"])
+        VALID["Request Validation"]
+        VALID400(["400 Bad Request"])
+    end
+
+    subgraph HANDLER["Route Handler"]
+        direction TB
+        CTRL["Controller"]
+        SVC["Service Layer"]
+    end
+
+    subgraph DATA["Data Layer"]
+        direction TB
+        CHKC{"Cache Check"}
+        CACHE["Cache  [Redis/Valkey]"]
+        REPO["Repository"]
+        DB[("Database")]
+    end
+
+    subgraph RESPONSE["Response"]
+        direction TB
+        SIDE["Publish Event\n/ External call"]
+        LOG["Logging + Metrics"]
+        RESP(["200 / 201 Response"])
+    end
+
+    REQ --> APIGW --> WAF
+    WAF -->|"Blocked"| BLOCK403
+    WAF -->|"Allowed"| RATE
+    RATE -->|"Exceeded"| RATE429
+    RATE -->|"OK"| AUTH
+    AUTH -->|"Invalid"| AUTH401
+    AUTH -->|"Valid"| VALID
+    VALID -->|"Invalid"| VALID400
+    VALID -->|"Valid"| CTRL --> SVC --> CHKC
+    CHKC -->|"hit"| CACHE --> LOG
+    CHKC -->|"miss"| REPO --> DB --> SVC
+    SVC --> SIDE --> LOG --> RESP
+
+    classDef reqStyle    fill:#6c757d,color:#fff,stroke:#495057
+    classDef perimStyle  fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef mwStyle     fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef handlerStyle fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef dataStyle   fill:#0dcaf0,color:#000,stroke:#0aa2c0
+    classDef respStyle   fill:#198754,color:#fff,stroke:#146c43
+    classDef errStyle    fill:#dc3545,color:#fff,stroke:#b02a37
+
+    class REQ reqStyle
+    class APIGW,WAF perimStyle
+    class RATE,AUTH,VALID mwStyle
+    class CTRL,SVC handlerStyle
+    class CHKC,CACHE,REPO,DB dataStyle
+    class SIDE,LOG,RESP respStyle
+    class BLOCK403,RATE429,AUTH401,VALID400 errStyle
 ```
 
 ---
@@ -210,38 +307,52 @@ For each significant data flow (ingestion, transformation, export):
 
 ```mermaid
 flowchart LR
-    subgraph "Data Sources"
-        A[User Input via UI]
-        B[Webhook from External System]
-        C[Scheduled Data Import]
-        D[File Upload S3]
+    subgraph SOURCES["Data Sources"]
+        direction TB
+        UI["User Input via UI"]
+        WH["Webhook from External System"]
+        SCHED["Scheduled Import"]
+        S3UP["File Upload  [S3]"]
     end
 
-    subgraph "Ingestion Layer"
-        E[API Validation]
-        F[S3 Event Trigger]
-        G[Lambda Processor]
+    subgraph INGEST["Ingestion Layer"]
+        direction TB
+        APIVAL["API Validation"]
+        S3EV["S3 Event Trigger"]
+        LAMBDA["Lambda Processor"]
     end
 
-    subgraph "Processing Layer"
-        H[Data Transformation]
-        I[Enrichment Service]
-        J[Deduplication Check]
+    subgraph PROCESS["Processing Layer"]
+        direction TB
+        XFORM["Data Transformation"]
+        ENRICH["Enrichment Service"]
+        DEDUP["Deduplication Check"]
     end
 
-    subgraph "Storage Layer"
-        K[(Primary DB)]
-        L[(Data Warehouse)]
-        M[(Cache)]
+    subgraph STORAGE["Storage Layer"]
+        direction TB
+        PDB[("Primary DB")]
+        DW[("Data Warehouse")]
+        CACHE[("Cache")]
     end
 
-    A --> E --> H
-    B --> E --> H
-    C --> G --> H
-    D --> F --> G --> H
-    H --> I --> J --> K
-    K --> L
-    K --> M
+    UI --> APIVAL --> XFORM
+    WH --> APIVAL
+    SCHED --> LAMBDA --> XFORM
+    S3UP --> S3EV --> LAMBDA
+    XFORM --> ENRICH --> DEDUP --> PDB
+    PDB --> DW
+    PDB --> CACHE
+
+    classDef srcStyle    fill:#6c757d,color:#fff,stroke:#495057
+    classDef ingestStyle fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef procStyle   fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef storeStyle  fill:#0dcaf0,color:#000,stroke:#0aa2c0
+
+    class UI,WH,SCHED,S3UP srcStyle
+    class APIVAL,S3EV,LAMBDA ingestStyle
+    class XFORM,ENRICH,DEDUP procStyle
+    class PDB,DW,CACHE storeStyle
 ```
 
 ---
@@ -251,55 +362,76 @@ flowchart LR
 Show the full pipeline from code commit to production deployment:
 
 ```mermaid
-flowchart TD
-    subgraph "Developer Workflow"
-        A[Developer Pushes Code] --> B[Pull Request Opened]
-        B --> C[GitHub Actions Triggered]
+flowchart LR
+    GIT(["Developer pushes code / opens PR"])
+
+    subgraph CI["CI Pipeline"]
+        direction TB
+        CO["Checkout + Install"]
+        LINT["Lint + Format"]
+        UNIT["Unit + Coverage"]
+        INT["Integration Tests"]
+        SQ["SonarQube Scan"]
+        SQG{Quality Gate}
+        SEC["Veracode SAST"]
+        SECG{Security Gate}
+        BUILD["Build + Package"]
+        PUSH["Push to ECR / Registry"]
     end
 
-    subgraph "CI Pipeline"
-        C --> D[Code Checkout]
-        D --> E[Install Dependencies]
-        E --> F[Lint & Format]
-        F --> G[Unit Tests + Coverage]
-        G --> H[Integration Tests]
-        H --> I[SonarQube / SonarCloud Scan]
-        I --> J{Quality Gate}
-        J -->|Fail| FAIL1[❌ PR Blocked — Quality Gate Failed]
-        J -->|Pass| K[Veracode SAST Scan]
-        K --> L{Security Gate}
-        L -->|Fail| FAIL2[❌ PR Blocked — Security Findings]
-        L -->|Pass| M[Build Docker Image / Package]
-        M --> N[Push to ECR / Artifact Registry]
+    subgraph DEV["Deploy — Dev"]
+        direction TB
+        DDEV["Deploy to Dev"]
+        SMOKE["Smoke Tests"]
     end
 
-    subgraph "CD Pipeline — Dev"
-        N --> O{Branch: develop?}
-        O -->|Yes| P[Deploy to Dev Environment]
-        P --> Q[Run Smoke Tests]
-        Q --> R[Notify Slack / Teams]
+    subgraph STAGING["Deploy — Staging"]
+        direction TB
+        DSTG["Deploy to Staging"]
+        E2E["E2E + Performance Tests"]
     end
 
-    subgraph "CD Pipeline — Staging"
-        N --> S{Branch: staging?}
-        S -->|Yes| T[Deploy to Staging]
-        T --> U[Run E2E Tests]
-        U --> V[Performance Tests]
-        V --> W{All Passed?}
-        W -->|No| FAIL3[❌ Rollback Staging]
-        W -->|Yes| X[Notify for Prod Approval]
+    subgraph PROD["Deploy — Production"]
+        direction TB
+        APPR["Manual Approval Gate"]
+        DPROD["Deploy  [Blue/Green]"]
+        HEALTH["Health Check"]
     end
 
-    subgraph "CD Pipeline — Production"
-        X --> Y[Manual Approval Gate]
-        Y --> Z[Deploy to Production — Blue/Green or Canary]
-        Z --> AA[Health Check]
-        AA --> AB{Healthy?}
-        AB -->|No| ROLLBACK[Automatic Rollback]
-        AB -->|Yes| AC[✅ Production Live]
-        AC --> AD[Post-deploy Smoke Tests]
-        AD --> AE[Notify Success]
-    end
+    SQFAIL(["PR Blocked\nQuality gate"])
+    SECFAIL(["PR Blocked\nSecurity findings"])
+    ROLLBACK(["Auto Rollback"])
+    DONE(["Production Live"])
+
+    GIT --> CO --> LINT --> UNIT --> INT --> SQ --> SQG
+    SQG -->|"Fail"| SQFAIL
+    SQG -->|"Pass"| SEC --> SECG
+    SECG -->|"Fail"| SECFAIL
+    SECG -->|"Pass"| BUILD --> PUSH
+    PUSH --> DDEV --> SMOKE
+    PUSH --> DSTG --> E2E --> APPR --> DPROD --> HEALTH
+    HEALTH -->|"Unhealthy"| ROLLBACK
+    HEALTH -->|"Healthy"| DONE
+
+    classDef trigStyle   fill:#6c757d,color:#fff,stroke:#495057
+    classDef ciStyle     fill:#0d6efd,color:#fff,stroke:#0a58ca
+    classDef secStyle    fill:#dc3545,color:#fff,stroke:#b02a37
+    classDef gateStyle   fill:#fd7e14,color:#000,stroke:#ca6510
+    classDef buildStyle  fill:#198754,color:#fff,stroke:#146c43
+    classDef devStyle    fill:#6f42c1,color:#fff,stroke:#59359a
+    classDef stgStyle    fill:#0dcaf0,color:#000,stroke:#0aa2c0
+    classDef prodStyle   fill:#ffc107,color:#000,stroke:#d39e00
+    classDef failStyle   fill:#dc3545,color:#fff,stroke:#b02a37
+
+    class GIT trigStyle
+    class CO,LINT,UNIT,INT ciStyle
+    class SQ,SEC secStyle
+    class SQG,SECG gateStyle
+    class BUILD,PUSH buildStyle
+    class DDEV,SMOKE devStyle
+    class DSTG,E2E stgStyle
+    class APPR,DPROD,HEALTH,DONE prodStyle
+    class SQFAIL,SECFAIL,ROLLBACK failStyle
 ```
 
 ---
